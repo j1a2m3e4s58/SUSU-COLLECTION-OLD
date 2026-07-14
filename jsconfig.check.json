@@ -1,0 +1,13 @@
+{
+  "extends": "./jsconfig.json",
+  "compilerOptions": {
+    "checkJs": true,
+    "noEmit": true,
+    "types": ["vite/client"]
+  },
+  "include": [
+    "src/api/authClient.js",
+    "src/api/portalClient.js",
+    "src/lib/secureBackup.js"
+  ]
+}

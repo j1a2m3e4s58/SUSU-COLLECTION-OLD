@@ -2,12 +2,11 @@ const API_ROOT = (import.meta.env.VITE_MAIL_API_URL || "/mail-api/api").replace(
 const AUTH_STORAGE_KEY = "susu_auth_user";
 
 async function request(path, payload) {
-  const token = getSessionToken();
   const response = await fetch(`${API_ROOT}${path}`, {
     method: "POST",
+    credentials: "include",
     headers: {
       "Content-Type": "application/json",
-      ...(token ? { Authorization: `Bearer ${token}` } : {}),
     },
     body: JSON.stringify(payload || {}),
   });
@@ -20,36 +19,47 @@ async function request(path, payload) {
 
 export function getStoredAuthUser() {
   try {
-    const raw = localStorage.getItem(AUTH_STORAGE_KEY);
+    const raw = localStorage.getItem(AUTH_STORAGE_KEY) || sessionStorage.getItem(AUTH_STORAGE_KEY);
     return raw ? JSON.parse(raw) : null;
   } catch {
     return null;
   }
 }
 
-export function storeAuthUser(user, sessionToken) {
-  const value = { ...user, sessionToken };
-  localStorage.setItem(AUTH_STORAGE_KEY, JSON.stringify(value));
+export function storeAuthUser(user, remember = false) {
+  const value = { ...user };
+  localStorage.removeItem(AUTH_STORAGE_KEY);
+  sessionStorage.removeItem(AUTH_STORAGE_KEY);
+  const storage = remember ? localStorage : sessionStorage;
+  storage.setItem(AUTH_STORAGE_KEY, JSON.stringify(value));
   return value;
 }
 
 export function clearStoredAuthUser() {
   localStorage.removeItem(AUTH_STORAGE_KEY);
+  sessionStorage.removeItem(AUTH_STORAGE_KEY);
 }
 
-export function getSessionToken() {
-  return getStoredAuthUser()?.sessionToken || null;
+export async function loginWithEmail(email, password, remember = false) {
+  const data = await request("/auth/login", { email, passwordHash: password, remember });
+  if (data.requiresPasswordChange) return data;
+  return storeAuthUser(data.user, remember);
 }
 
-export async function loginWithEmail(email, password) {
-  const data = await request("/auth/login", { email, passwordHash: password });
-  return storeAuthUser(data.user, data.sessionToken);
+export async function completeStaffPasswordChange(payload) {
+  const data = await request("/auth/complete-password-change", {
+    email: payload.email,
+    temporaryPassword: payload.temporaryPassword,
+    newPassword: payload.newPassword,
+    remember: payload.remember === true,
+  });
+  return storeAuthUser(data.user, payload.remember === true);
 }
 
-export async function loginAgentWithUsername(username, password) {
-  const data = await request("/auth/agent-login", { username, passwordHash: password });
+export async function loginAgentWithUsername(username, password, remember = false) {
+  const data = await request("/auth/agent-login", { username, passwordHash: password, remember });
   if (data.requiresSetup) return data;
-  return storeAuthUser(data.user, data.sessionToken);
+  return storeAuthUser(data.user, remember);
 }
 
 export async function verifyAgentSetupPhone(payload) {
@@ -68,8 +78,16 @@ export async function completeAgentSetup(payload) {
     phone: payload.phone,
     token: payload.token,
     newPasswordHash: payload.newPassword,
+    remember: payload.remember === true,
   });
-  return storeAuthUser(data.user, data.sessionToken);
+  return storeAuthUser(data.user, payload.remember === true);
+}
+
+export async function getCurrentUser() {
+  const response = await fetch(`${API_ROOT}/auth/me`, { credentials: "include" });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(data.error || "Authentication required");
+  return data.user;
 }
 
 export async function registerWithEmail(payload) {

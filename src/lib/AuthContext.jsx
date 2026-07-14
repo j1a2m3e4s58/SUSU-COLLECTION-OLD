@@ -2,6 +2,8 @@ import React, { createContext, useContext, useEffect, useMemo, useState } from "
 import {
   clearStoredAuthUser,
   completeAgentSetup,
+  completeStaffPasswordChange,
+  getCurrentUser,
   getStoredAuthUser,
   loginAgentWithUsername,
   loginWithEmail,
@@ -19,8 +21,20 @@ export const AuthProvider = ({ children }) => {
   const [isLoadingPublicSettings, setIsLoadingPublicSettings] = useState(true);
 
   useEffect(() => {
-    setUser(normalizeUser(getStoredAuthUser()));
-    setIsLoadingAuth(false);
+    const remembered = Boolean(localStorage.getItem("susu_auth_user"));
+    const cached = normalizeUser(getStoredAuthUser());
+    if (cached) setUser(cached);
+    getCurrentUser()
+      .then((current) => {
+        const normalized = normalizeUser(current);
+        storeAuthUser(normalized, remembered);
+        setUser(normalized);
+      })
+      .catch(() => {
+        clearStoredAuthUser();
+        setUser(null);
+      })
+      .finally(() => setIsLoadingAuth(false));
   }, []);
 
   const refreshPortalSettings = async () => {
@@ -56,15 +70,17 @@ export const AuthProvider = ({ children }) => {
     };
   }, [user?.id]);
 
-  const login = async (email, password) => {
-    const authUser = normalizeUser(await loginWithEmail(email, password));
+  const login = async (email, password, remember = false) => {
+    const result = await loginWithEmail(email, password, remember);
+    if (result?.requiresPasswordChange) return result;
+    const authUser = normalizeUser(result);
     setUser(authUser);
     pingPresence(authUser.id).catch(() => {});
     return authUser;
   };
 
-  const loginAgent = async (username, password) => {
-    const result = await loginAgentWithUsername(username, password);
+  const loginAgent = async (username, password, remember = false) => {
+    const result = await loginAgentWithUsername(username, password, remember);
     if (result?.requiresSetup) return result;
     const authUser = normalizeUser(result);
     setUser(authUser);
@@ -79,6 +95,13 @@ export const AuthProvider = ({ children }) => {
     return authUser;
   };
 
+  const completeStaffFirstLogin = async (payload) => {
+    const authUser = normalizeUser(await completeStaffPasswordChange(payload));
+    setUser(authUser);
+    pingPresence(authUser.id).catch(() => {});
+    return authUser;
+  };
+
   const logout = async () => {
     await logoutPresence(user?.id).catch(() => {});
     await logoutFromServer();
@@ -88,10 +111,9 @@ export const AuthProvider = ({ children }) => {
 
   const updateUser = (nextUser) => {
     const normalized = normalizeUser(nextUser);
-    setUser((current) => {
-      const sessionToken = current?.sessionToken || normalized?.sessionToken;
-      return sessionToken ? storeAuthUser(normalized, sessionToken) : normalized;
-    });
+    const remembered = Boolean(localStorage.getItem("susu_auth_user"));
+    storeAuthUser(normalized, remembered);
+    setUser(normalized);
   };
 
   const value = useMemo(
@@ -108,6 +130,7 @@ export const AuthProvider = ({ children }) => {
       login,
       loginAgent,
       completeAgentFirstLogin,
+      completeStaffFirstLogin,
       logout,
       setUser,
       updateUser,

@@ -14,7 +14,6 @@ import { Label } from "@/components/ui/label";
 import {
   getActiveStaff,
   getPortalSettings,
-  getStoredPortalControlPassword,
   updatePortalSettings,
 } from "@/api/portalClient";
 import { useAuth } from "@/lib/AuthContext";
@@ -78,20 +77,13 @@ export default function BranchManagement() {
       setError("Only the Owner Admin can add branches because this changes system-wide registration and reporting lists.");
       return;
     }
-    const portalPassword = getStoredPortalControlPassword();
-    if (!portalPassword) {
-      setError("Open Portal Control from the sidebar and enter the password before adding branches.");
-      return;
-    }
-
     setSaving(true);
     try {
       const updated = await updatePortalSettings(
         {
           ...(settings || {}),
           branches: [...branches, branchName],
-        },
-        portalPassword
+        }
       );
       setSettings(updated);
       setBranches(updated.branches || []);

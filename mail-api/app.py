@@ -3,16 +3,27 @@ from __future__ import annotations
 import json
 import os
 import secrets
+import shutil
 import smtplib
 import tempfile
 import time
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from email.message import EmailMessage
 from urllib.parse import urlencode, urlparse, urlunparse, parse_qsl
 
 from dotenv import load_dotenv
 from flask import Flask, jsonify, redirect, request, send_from_directory
+from werkzeug.middleware.proxy_fix import ProxyFix
 from werkzeug.security import check_password_hash, generate_password_hash
 from werkzeug.utils import secure_filename
+
+from storage_backend import (
+    database_enabled,
+    database_health,
+    ensure_document,
+    read_document,
+    write_document,
+)
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 load_dotenv(os.path.join(BASE_DIR, ".env"))
@@ -25,6 +36,7 @@ PASSWORD_STORE_PATH = os.path.join(DATA_DIR, "password_store.json")
 USERS_STORE_PATH = os.path.join(DATA_DIR, "users_store.json")
 PENDING_VERIFICATIONS_PATH = os.path.join(DATA_DIR, "pending_verifications.json")
 RESET_TOKENS_PATH = os.path.join(DATA_DIR, "reset_tokens.json")
+AGENT_SETUP_TOKENS_PATH = os.path.join(DATA_DIR, "agent_setup_tokens.json")
 SESSIONS_STORE_PATH = os.path.join(DATA_DIR, "sessions_store.json")
 ANNOUNCEMENTS_STORE_PATH = os.path.join(DATA_DIR, "announcements_store.json")
 FORMS_STORE_PATH = os.path.join(DATA_DIR, "forms_store.json")
@@ -45,8 +57,8 @@ ONLINE_WINDOW_SECONDS = 20
 RESET_TOKEN_TTL_SECONDS = 30 * 60
 VERIFICATION_TTL_SECONDS = 15 * 60
 SESSION_TTL_SECONDS = 30 * 24 * 60 * 60
+SESSION_COOKIE_NAME = "susu_session"
 TRAINING_REMINDER_COOLDOWN_SECONDS = 24 * 60 * 60
-PORTAL_CONTROL_PASSWORD = "T4n4AMEg8f52468"
 RATE_LIMIT_WINDOW_SECONDS = 15 * 60
 RATE_LIMIT_MAX_ATTEMPTS = 8
 DEFAULT_PORTAL_BRANCHES = [
@@ -79,9 +91,6 @@ DEFAULT_PORTAL_SETTINGS = {
     "loginButtonText": "Secure Login",
     "authorizedAccessText": "Authorized Access Only",
     "appMode": "test",
-    "portalControlPassword": PORTAL_CONTROL_PASSWORD,
-    "itAccessCode": "",
-    "hrAccessCode": "",
     "sessionDays": 30,
     "verificationMinutes": 15,
     "passwordResetMinutes": 30,
@@ -99,19 +108,26 @@ DEFAULT_PORTAL_SETTINGS = {
 }
 
 TEST_CUSTOMER_SEED_ROWS = [
-    ("TEST AMA MENSAH", "131000100001", "0240000001", "BAWJIASE"),
-    ("TEST KWAME ADJEI", "131000100002", "0240000002", "BAWJIASE"),
-    ("TEST EFUA BOATENG", "131000100003", "0240000003", "OFAAKOR"),
-    ("TEST KOJO APPIAH", "131000100004", "0240000004", "OFAAKOR"),
-    ("TEST ABENA OWUSU", "131000100005", "0240000005", "ADEISO"),
-    ("TEST YAW ASANTE", "131000100006", "0240000006", "ADEISO"),
-    ("TEST AKOSUA DARKO", "131000100007", "0240000007", "HEAD OFFICE"),
-    ("TEST KOFI SARPONG", "131000100008", "0240000008", "KASOA MAIN"),
+    ("TEST AMA MENSAH", "1310000100001", "0240000001", "BAWJIASE"),
+    ("TEST KWAME ADJEI", "1310000100002", "0240000002", "BAWJIASE"),
+    ("TEST EFUA BOATENG", "1310000100003", "0240000003", "OFAAKOR"),
+    ("TEST KOJO APPIAH", "1310000100004", "0240000004", "OFAAKOR"),
+    ("TEST ABENA OWUSU", "1310000100005", "0240000005", "ADEISO"),
+    ("TEST YAW ASANTE", "1310000100006", "0240000006", "ADEISO"),
+    ("TEST AKOSUA DARKO", "1310000100007", "0240000007", "HEAD OFFICE"),
+    ("TEST KOFI SARPONG", "1310000100008", "0240000008", "KASOA MAIN"),
 ]
 
 
 def env_secret(name: str) -> str:
     return str(os.getenv(name, "") or "").strip()
+
+
+def email_delivery_configured() -> bool:
+    return all(
+        env_secret(key)
+        for key in ("MAIL_SERVER", "MAIL_USERNAME", "MAIL_PASSWORD", "MAIL_DEFAULT_SENDER")
+    )
 
 
 DEFAULT_INITIAL_PASSWORD = env_secret("PORTAL_DEFAULT_INITIAL_PASSWORD")
@@ -287,6 +303,7 @@ INITIAL_USERS = [
     },
 ]
 app = Flask(__name__, static_folder=None)
+app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1)
 os.makedirs(DATA_DIR, exist_ok=True)
 os.makedirs(UPLOADS_DIR, exist_ok=True)
 FAILED_AUTH_ATTEMPTS: dict[str, list[int]] = {}
@@ -314,6 +331,7 @@ STORE_DEFAULTS: dict[str, object] = {
     USERS_STORE_PATH: [],
     PENDING_VERIFICATIONS_PATH: {},
     RESET_TOKENS_PATH: {},
+    AGENT_SETUP_TOKENS_PATH: {},
     SESSIONS_STORE_PATH: {},
     ANNOUNCEMENTS_STORE_PATH: [],
     FORMS_STORE_PATH: [],
@@ -324,19 +342,25 @@ STORE_DEFAULTS: dict[str, object] = {
     TRAINING_DOCUMENT_OPENS_STORE_PATH: [],
     TRAINING_REMINDERS_STORE_PATH: [],
     AUDIT_LOGS_STORE_PATH: [],
+    PORTAL_SETTINGS_STORE_PATH: {},
     CUSTOMERS_STORE_PATH: [],
     COLLECTIONS_STORE_PATH: [],
+    DAILY_CLOSES_STORE_PATH: [],
 }
 
 
 def initialize_data_directory() -> None:
     for path, default in STORE_DEFAULTS.items():
+        if database_enabled():
+            ensure_document(path, default)
+            continue
         if os.path.exists(path):
             continue
         legacy_path = os.path.join(BASE_DIR, os.path.basename(path))
-        if path != legacy_path and os.path.exists(legacy_path):
+        migrate_legacy = os.getenv("PORTAL_MIGRATE_LEGACY_DATA", "").strip().lower() in {"1", "true", "yes"}
+        if migrate_legacy and path != legacy_path and os.path.exists(legacy_path):
             try:
-                os.replace(legacy_path, path)
+                shutil.copy2(legacy_path, path)
                 continue
             except OSError:
                 pass
@@ -368,6 +392,20 @@ def allowed_origins() -> set[str]:
     return {item.strip() for item in raw.split(",") if item.strip()}
 
 
+@app.before_request
+def enforce_mutation_origin():
+    if request.method in {"GET", "HEAD", "OPTIONS"} or not request.path.startswith("/api/"):
+        return None
+    origin = str(request.headers.get("Origin", "") or "").strip().rstrip("/")
+    if not origin:
+        return None
+    origin_host = urlparse(origin).netloc.lower()
+    same_host = origin_host == str(request.host or "").lower()
+    if not same_host and origin not in allowed_origins():
+        return jsonify({"error": "Request origin is not allowed"}), 403
+    return None
+
+
 @app.after_request
 def add_cors_headers(response):
     origin = request.headers.get("Origin")
@@ -375,11 +413,25 @@ def add_cors_headers(response):
     if "*" in origins:
         response.headers["Access-Control-Allow-Origin"] = origin or "*"
         response.headers["Vary"] = "Origin"
+        if origin:
+            response.headers["Access-Control-Allow-Credentials"] = "true"
     elif origin and origin in origins:
         response.headers["Access-Control-Allow-Origin"] = origin
         response.headers["Vary"] = "Origin"
-    response.headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization"
+        response.headers["Access-Control-Allow-Credentials"] = "true"
+    response.headers["Access-Control-Allow-Headers"] = "Content-Type"
     response.headers["Access-Control-Allow-Methods"] = "GET,POST,OPTIONS"
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+    response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
+    response.headers["Content-Security-Policy"] = (
+        "default-src 'self'; img-src 'self' data: blob: https:; "
+        "style-src 'self' 'unsafe-inline'; script-src 'self'; "
+        "connect-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'"
+    )
+    if request.is_secure:
+        response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
     return response
 
 
@@ -690,11 +742,7 @@ def normalize_training_document_payload(data: dict, actor: dict) -> dict:
 
 
 def parse_session_token() -> str:
-    header = str(request.headers.get("Authorization", "")).strip()
-    if header.startswith("Bearer "):
-        return header[7:].strip()
-    query_token = str(request.args.get("sessionToken", "")).strip()
-    return query_token
+    return str(request.cookies.get(SESSION_COOKIE_NAME, "") or "").strip()
 
 
 def validate_email(email: str) -> str:
@@ -793,6 +841,30 @@ def now_seconds() -> int:
     return int(time.time())
 
 
+def money_to_pesewas(value) -> int:
+    try:
+        amount = Decimal(str(value or "0")).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+    except (InvalidOperation, ValueError):
+        raise ValueError("Amount must be a valid number")
+    pesewas = int(amount * 100)
+    if pesewas <= 0:
+        raise ValueError("Amount must be greater than zero")
+    return pesewas
+
+
+def record_amount_pesewas(item: dict) -> int:
+    if str(item.get("amountPesewas", "")).lstrip("-").isdigit():
+        return int(item.get("amountPesewas", 0))
+    try:
+        return int((Decimal(str(item.get("amount") or "0")) * 100).quantize(Decimal("1"), rounding=ROUND_HALF_UP))
+    except (InvalidOperation, ValueError):
+        return 0
+
+
+def pesewas_to_amount(pesewas: int) -> float:
+    return float(Decimal(int(pesewas)) / Decimal(100))
+
+
 def legacy_hash_password(password: str) -> str:
     h = 0
     for char in password:
@@ -819,7 +891,23 @@ def verify_password(stored_value: str, password: str) -> bool:
     return stored_value == legacy_hash_password(password)
 
 
+def validate_password_strength(password: str, *, label: str = "Password") -> str:
+    value = str(password or "")
+    if len(value) < 10:
+        raise ValueError(f"{label} must be at least 10 characters.")
+    if not any(char.islower() for char in value) or not any(char.isupper() for char in value):
+        raise ValueError(f"{label} must include uppercase and lowercase letters.")
+    if not any(char.isdigit() for char in value):
+        raise ValueError(f"{label} must include a number.")
+    if not any(not char.isalnum() for char in value):
+        raise ValueError(f"{label} must include a symbol.")
+    return value
+
+
 def atomic_write_json(path: str, payload) -> None:
+    if database_enabled():
+        write_document(path, payload)
+        return
     directory = os.path.dirname(path)
     fd, tmp_path = tempfile.mkstemp(prefix="tmp-", suffix=".json", dir=directory)
     try:
@@ -842,6 +930,8 @@ def atomic_write_json(path: str, payload) -> None:
 
 
 def read_json_file(path: str, default):
+    if database_enabled():
+        return read_document(path, default)
     if not os.path.exists(path):
         return default
     try:
@@ -1110,6 +1200,39 @@ def save_reset_tokens(store: dict[str, dict]) -> None:
     atomic_write_json(RESET_TOKENS_PATH, store)
 
 
+def load_agent_setup_tokens() -> dict[str, dict]:
+    raw = read_json_file(AGENT_SETUP_TOKENS_PATH, {})
+    if not isinstance(raw, dict):
+        return {}
+    current = now_seconds()
+    return {
+        str(user_id): item
+        for user_id, item in raw.items()
+        if isinstance(item, dict) and int(item.get("expiresAt", 0) or 0) > current
+    }
+
+
+def issue_agent_setup_code(user_id: str) -> str:
+    code = f"{secrets.randbelow(900000) + 100000:06d}"
+    tokens = load_agent_setup_tokens()
+    tokens[user_id] = {
+        "codeHash": hash_password_for_storage(code),
+        "expiresAt": now_seconds() + 30 * 60,
+    }
+    atomic_write_json(AGENT_SETUP_TOKENS_PATH, tokens)
+    return code
+
+
+def consume_agent_setup_code(user_id: str, code: str) -> bool:
+    tokens = load_agent_setup_tokens()
+    item = tokens.get(user_id)
+    if not item or not verify_password(str(item.get("codeHash", "")), code):
+        return False
+    tokens.pop(user_id, None)
+    atomic_write_json(AGENT_SETUP_TOKENS_PATH, tokens)
+    return True
+
+
 def load_json_list_store(path: str) -> list[dict]:
     raw = read_json_file(path, [])
     return raw if isinstance(raw, list) else []
@@ -1202,9 +1325,6 @@ def load_portal_settings_store() -> dict:
         "loginSubtitle": str(raw.get("loginSubtitle") or DEFAULT_PORTAL_SETTINGS["loginSubtitle"]),
         "loginButtonText": str(raw.get("loginButtonText") or DEFAULT_PORTAL_SETTINGS["loginButtonText"]),
         "authorizedAccessText": str(raw.get("authorizedAccessText") or DEFAULT_PORTAL_SETTINGS["authorizedAccessText"]),
-        "portalControlPassword": str(raw.get("portalControlPassword") or DEFAULT_PORTAL_SETTINGS["portalControlPassword"]),
-        "itAccessCode": str(raw.get("itAccessCode") or DEFAULT_PORTAL_SETTINGS["itAccessCode"]),
-        "hrAccessCode": str(raw.get("hrAccessCode") or DEFAULT_PORTAL_SETTINGS["hrAccessCode"]),
         "sessionDays": normalize_positive_number(raw.get("sessionDays"), DEFAULT_PORTAL_SETTINGS["sessionDays"]),
         "verificationMinutes": normalize_positive_number(raw.get("verificationMinutes"), DEFAULT_PORTAL_SETTINGS["verificationMinutes"]),
         "passwordResetMinutes": normalize_positive_number(raw.get("passwordResetMinutes"), DEFAULT_PORTAL_SETTINGS["passwordResetMinutes"]),
@@ -1223,6 +1343,15 @@ def load_portal_settings_store() -> dict:
         "updatedAt": int(raw.get("updatedAt", 0) or 0),
         "updatedBy": raw.get("updatedBy") if isinstance(raw.get("updatedBy"), dict) else None,
     }
+
+
+def public_portal_settings() -> dict:
+    """Return only settings that are safe to expose before authentication."""
+    settings = load_portal_settings_store()
+    settings.pop("updatedBy", None)
+    settings["emailEnabled"] = email_delivery_configured()
+    settings["persistentStorage"] = database_enabled()
+    return settings
 
 
 def save_portal_settings_store(settings: dict) -> None:
@@ -1494,6 +1623,27 @@ def issue_session(user_id: str) -> str:
     return token
 
 
+def session_cookie_response(user: dict, token: str, remember: bool = False):
+    response = jsonify({"ok": True, "user": user})
+    max_age = int(load_portal_settings_store()["sessionDays"]) * 24 * 60 * 60 if remember else None
+    secure_cookie = request.is_secure or str(os.getenv("COOKIE_SECURE", "")).lower() in {"1", "true", "yes"}
+    response.set_cookie(
+        SESSION_COOKIE_NAME,
+        token,
+        max_age=max_age,
+        httponly=True,
+        secure=secure_cookie,
+        samesite="Strict",
+        path="/",
+    )
+    return response
+
+
+def clear_session_cookie(response):
+    response.delete_cookie(SESSION_COOKIE_NAME, path="/", samesite="Strict")
+    return response
+
+
 def revoke_session(token: str) -> None:
     sessions = load_sessions()
     if token in sessions:
@@ -1518,6 +1668,9 @@ def require_authenticated_user():
     sessions = load_sessions()
     session = sessions.get(token)
     if not session:
+        return None, None, (jsonify({"error": "Invalid or expired session"}), 401)
+    if int(session.get("expiresAt", 0) or 0) <= now_seconds():
+        revoke_session(token)
         return None, None, (jsonify({"error": "Invalid or expired session"}), 401)
     users = load_user_store()
     user = find_user_by_id(users, session["userId"])
@@ -2361,7 +2514,15 @@ def save_uploaded_media(file_storage, kind: str) -> dict:
 
 @app.route("/api/health", methods=["GET"])
 def health():
-    return jsonify({"ok": True})
+    try:
+        database_health()
+        return jsonify({
+            "ok": True,
+            "storage": "postgresql" if database_enabled() else "local-json",
+        })
+    except Exception:
+        app.logger.exception("Database health check failed")
+        return jsonify({"ok": False, "storage": "unavailable"}), 503
 
 
 @app.route("/uploads/<path:filename>", methods=["GET"])
@@ -2571,23 +2732,7 @@ def create_audit_log():
     preflight = handle_options()
     if preflight:
         return preflight
-    _, auth_user, error = require_authenticated_user()
-    if error:
-        return error
-    data, error = require_json()
-    if error:
-        return error
-    action = str(data.get("action", "")).strip().upper()
-    target = str(data.get("target", "")).strip()
-    if not action or not target:
-        return jsonify({"error": "Action and target are required"}), 400
-    entry = record_audit_log(
-        auth_user,
-        action,
-        target,
-        str(data.get("ipAddress", "") or request_ip_address()),
-    )
-    return jsonify({"ok": True, "log": entry})
+    return jsonify({"error": "Audit records can only be generated by server operations."}), 405
 
 
 @app.route("/api/audit-logs/<int:item_id>/delete", methods=["POST", "OPTIONS"])
@@ -2595,15 +2740,7 @@ def delete_audit_log(item_id: int):
     preflight = handle_options()
     if preflight:
         return preflight
-    _, _, error = require_owner_admin()
-    if error:
-        return error
-    logs = load_audit_logs_store()
-    filtered = [item for item in logs if int(item.get("id", 0) or 0) != item_id]
-    if len(filtered) == len(logs):
-        return jsonify({"error": "Log entry not found"}), 404
-    save_audit_logs_store(filtered)
-    return jsonify({"ok": True})
+    return jsonify({"error": "Audit records are append-only and cannot be deleted."}), 405
 
 
 @app.route("/api/audit-logs/delete", methods=["POST", "OPTIONS"])
@@ -2611,29 +2748,12 @@ def delete_audit_logs():
     preflight = handle_options()
     if preflight:
         return preflight
-    _, _, error = require_owner_admin()
-    if error:
-        return error
-    data, error = require_json()
-    if error:
-        return error
-    ids = {
-        int(item)
-        for item in data.get("ids", [])
-        if isinstance(item, (int, float, str)) and str(item).strip().isdigit()
-    }
-    if not ids:
-        return jsonify({"ok": True})
-    logs = load_audit_logs_store()
-    save_audit_logs_store(
-        [item for item in logs if int(item.get("id", 0) or 0) not in ids]
-    )
-    return jsonify({"ok": True})
+    return jsonify({"error": "Audit records are append-only and cannot be deleted."}), 405
 
 
 @app.route("/api/portal-settings", methods=["GET"])
 def get_portal_settings():
-    return jsonify({"settings": load_portal_settings_store()})
+    return jsonify({"settings": public_portal_settings()})
 
 
 @app.route("/api/portal-settings", methods=["POST", "OPTIONS"])
@@ -2647,9 +2767,6 @@ def update_portal_settings():
     data, error = require_json()
     if error:
         return error
-    password = str(data.get("password", "") or "")
-    if password.upper() != str(load_portal_settings_store()["portalControlPassword"]).upper():
-        return jsonify({"error": "Portal control password is incorrect"}), 403
     branches = normalize_portal_branches(data.get("branches"))
     settings = {
         "bankName": str(data.get("bankName") or DEFAULT_PORTAL_SETTINGS["bankName"]).strip(),
@@ -2667,9 +2784,6 @@ def update_portal_settings():
         "loginSubtitle": str(data.get("loginSubtitle") or DEFAULT_PORTAL_SETTINGS["loginSubtitle"]),
         "loginButtonText": str(data.get("loginButtonText") or DEFAULT_PORTAL_SETTINGS["loginButtonText"]),
         "authorizedAccessText": str(data.get("authorizedAccessText") or DEFAULT_PORTAL_SETTINGS["authorizedAccessText"]),
-        "portalControlPassword": str(data.get("portalControlPassword") or DEFAULT_PORTAL_SETTINGS["portalControlPassword"]),
-        "itAccessCode": str(data.get("itAccessCode") or ""),
-        "hrAccessCode": str(data.get("hrAccessCode") or ""),
         "sessionDays": normalize_positive_number(data.get("sessionDays"), DEFAULT_PORTAL_SETTINGS["sessionDays"]),
         "verificationMinutes": normalize_positive_number(data.get("verificationMinutes"), DEFAULT_PORTAL_SETTINGS["verificationMinutes"]),
         "passwordResetMinutes": normalize_positive_number(data.get("passwordResetMinutes"), DEFAULT_PORTAL_SETTINGS["passwordResetMinutes"]),
@@ -2710,7 +2824,7 @@ def update_portal_settings():
         message=f"{auth_user['fullname']} updated portal branches, SUSU categories, labels, or access settings.",
         link_to="/portal-control",
     )
-    return jsonify({"ok": True, "settings": settings})
+    return jsonify({"ok": True, "settings": public_portal_settings()})
 
 
 @app.route("/api/backup/export", methods=["GET"])
@@ -2729,12 +2843,11 @@ def export_production_backup():
                 "role": auth_user["role"],
             },
             "dataDir": DATA_DIR,
-            "schemaVersion": 1,
+            "schemaVersion": 2,
         },
         "stores": {
             "users": load_user_store(),
-            "sessions": load_sessions(),
-            "presence": load_presence_store(),
+            "passwords": load_password_store(),
             "announcements": load_json_list_store(ANNOUNCEMENTS_STORE_PATH),
             "forms": load_json_list_store(FORMS_STORE_PATH),
             "trainingVideos": load_json_list_store(TRAINING_VIDEOS_STORE_PATH),
@@ -2778,17 +2891,13 @@ def import_production_backup():
     data, error = require_json()
     if error:
         return error
-    password = str(data.get("password", "") or "")
-    if password.upper() != str(load_portal_settings_store()["portalControlPassword"]).upper():
-        return jsonify({"error": "Portal control password is incorrect"}), 403
     stores = data.get("stores") if isinstance(data.get("stores"), dict) else None
     if not stores:
         return jsonify({"error": "Backup file is missing stores data."}), 400
 
     current_backup = {
         "users": load_user_store(),
-        "sessions": load_sessions(),
-        "presence": load_presence_store(),
+        "passwords": load_password_store(),
         "notifications": load_json_list_store(NOTIFICATIONS_STORE_PATH),
         "auditLogs": load_audit_logs_store(),
         "portalSettings": load_portal_settings_store(),
@@ -2800,10 +2909,12 @@ def import_production_backup():
     try:
         if "users" in stores:
             save_user_store([normalize_user(item) for item in stores.get("users", []) if isinstance(item, dict)])
-        if "sessions" in stores and isinstance(stores.get("sessions"), dict):
-            save_sessions(stores.get("sessions") or {})
-        if "presence" in stores and isinstance(stores.get("presence"), dict):
-            save_presence_store(stores.get("presence") or {})
+        if "passwords" in stores and isinstance(stores.get("passwords"), dict):
+            save_password_store({
+                str(key): str(value)
+                for key, value in stores.get("passwords", {}).items()
+                if str(key).strip() and is_secure_password_hash(str(value))
+            })
         if "notifications" in stores:
             save_json_list_store(NOTIFICATIONS_STORE_PATH, stores.get("notifications") or [])
         if "auditLogs" in stores:
@@ -2820,8 +2931,7 @@ def import_production_backup():
             save_json_list_store(DAILY_CLOSES_STORE_PATH, stores.get("dailyCloses") or [])
     except Exception as exc:
         save_user_store(current_backup["users"])
-        save_sessions(current_backup["sessions"])
-        save_presence_store(current_backup["presence"])
+        save_password_store(current_backup["passwords"])
         save_json_list_store(NOTIFICATIONS_STORE_PATH, current_backup["notifications"])
         save_audit_logs_store(current_backup["auditLogs"])
         save_portal_settings_store(current_backup["portalSettings"])
@@ -2830,8 +2940,10 @@ def import_production_backup():
         save_json_list_store(DAILY_CLOSES_STORE_PATH, current_backup["dailyCloses"])
         return jsonify({"error": f"Backup import failed and current data was restored: {exc}"}), 400
 
+    save_sessions({})
+    save_presence_store({})
     record_audit_log(auth_user, "IMPORT_BACKUP", {"stores": list(stores.keys())})
-    return jsonify({"ok": True, "settings": load_portal_settings_store()})
+    return jsonify({"ok": True, "settings": public_portal_settings(), "reauthenticationRequired": True})
 
 
 @app.route("/api/maintenance/clear-test-data", methods=["POST", "OPTIONS"])
@@ -2977,9 +3089,10 @@ def close_daily_collections():
         "agentName": auth_user["fullname"],
         "branch": auth_user.get("branch", ""),
         "transactionCount": len(collections),
-        "totalAmount": sum(float(item.get("amount") or 0) for item in collections),
+        "totalAmountPesewas": sum(record_amount_pesewas(item) for item in collections),
         "closedAt": now_ms(),
     }
+    close["totalAmount"] = pesewas_to_amount(close["totalAmountPesewas"])
     closes.append(close)
     save_json_list_store(DAILY_CLOSES_STORE_PATH, closes)
     record_audit_log(auth_user, "CLOSE_DAILY_COLLECTIONS", close)
@@ -3293,11 +3406,10 @@ def create_collection():
     if any(str(entry.get("agentId")) == auth_user["id"] and str(entry.get("date")) == transaction_date for entry in closes):
         return jsonify({"error": "This collection day is closed. Reopen through owner support before recording more deposits."}), 400
     try:
-        amount = float(data.get("amount") or 0)
-    except (TypeError, ValueError):
-        return jsonify({"error": "Amount must be a valid number"}), 400
-    if amount <= 0:
-        return jsonify({"error": "Amount must be greater than zero"}), 400
+        amount_pesewas = money_to_pesewas(data.get("amount"))
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+    amount = pesewas_to_amount(amount_pesewas)
     today = time.strftime("%Y-%m-%d")
     current_time = time.strftime("%H:%M")
     collections = load_json_list_store(COLLECTIONS_STORE_PATH)
@@ -3320,6 +3432,7 @@ def create_collection():
         "account_name": str(data.get("account_name") or (customer or {}).get("account_name") or "").strip(),
         "account_number": str(data.get("account_number") or (customer or {}).get("account_number") or "").strip(),
         "amount": amount,
+        "amountPesewas": amount_pesewas,
         "agent_name": str(data.get("agent_name") or auth_user["fullname"]),
         "agent_id": auth_user["id"],
         "agent_email": auth_user["email"],
@@ -3339,7 +3452,11 @@ def create_collection():
     collections.append(collection)
     save_json_list_store(COLLECTIONS_STORE_PATH, collections)
     if customer:
-        customer["total_deposits"] = float(customer.get("total_deposits") or 0) + amount
+        existing_total_pesewas = int(customer.get("totalDepositsPesewas", 0) or 0)
+        if not existing_total_pesewas and customer.get("total_deposits"):
+            existing_total_pesewas = max(0, record_amount_pesewas({"amount": customer.get("total_deposits")}))
+        customer["totalDepositsPesewas"] = existing_total_pesewas + amount_pesewas
+        customer["total_deposits"] = pesewas_to_amount(customer["totalDepositsPesewas"])
         customer["last_deposit_date"] = collection["transaction_date"]
         save_json_list_store(CUSTOMERS_STORE_PATH, customers)
     record_audit_log(auth_user, "CREATE_COLLECTION", {"collectionId": collection["id"], "amount": amount, "customer": collection["account_name"]})
@@ -3871,8 +3988,7 @@ def create_agent_account():
         phone = normalize_phone(data.get("phone"))
         branch = managed_branch_for_user(auth_user, data.get("branch"))
         fullname = str(data.get("fullname") or username).strip()
-        if len(temp_password) < 6:
-            return jsonify({"error": "Temporary password must be at least 6 characters."}), 400
+        validate_password_strength(temp_password, label="Temporary password")
     except ValueError as exc:
         return jsonify({"error": str(exc)}), 400
 
@@ -3908,7 +4024,63 @@ def create_agent_account():
     passwords[agent_password_key(username)] = hash_password_for_storage(temp_password)
     save_user_store(users)
     save_password_store(passwords)
+    setup_code = issue_agent_setup_code(user["id"])
     record_audit_log(auth_user, "CREATE_AGENT_ACCOUNT", staff_audit_target(user, {"username": username}))
+    return jsonify({"ok": True, "user": user, "setupCode": setup_code})
+
+
+@app.route("/api/users/create", methods=["POST", "OPTIONS"])
+def create_staff_user():
+    preflight = handle_options()
+    if preflight:
+        return preflight
+    _, auth_user, error = require_owner_admin()
+    if error:
+        return error
+    data, error = require_json()
+    if error:
+        return error
+    try:
+        email = validate_email(str(data.get("email", "")))
+        fullname = normalize_required_text(data.get("fullname"), "Full name")
+        phone = normalize_phone(data.get("phone"))
+        branch = normalize_portal_branch_name(data.get("branch"))
+        password = validate_password_strength(str(data.get("temporaryPassword") or ""), label="Temporary password")
+        role = str(data.get("role") or "GeneralStaff").strip()
+        if role not in {"GeneralStaff", "Supervisor"}:
+            raise ValueError("Role must be General Staff or Supervisor.")
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+
+    users = load_user_store()
+    if find_user_by_email(users, email):
+        return jsonify({"error": "Email is already registered."}), 400
+    user = normalize_user({
+        "id": f"staff-{now_ms()}-{secrets.token_hex(3)}",
+        "fullname": fullname,
+        "phone": phone,
+        "email": email,
+        "role": role,
+        "position": "SUSU Branch Supervisor" if role == "Supervisor" else "SUSU Staff",
+        "department": "SUSU",
+        "branch": branch,
+        "managedBranches": [branch] if role == "Supervisor" else [],
+        "permissions": default_permissions_for_role(role),
+        "isActive": True,
+        "isVerified": True,
+        "lastSeen": 0,
+        "registrationTime": now_ms(),
+        "isArchived": False,
+        "forcePasswordChange": True,
+        "setupComplete": True,
+    })
+    validate_supervisor_configuration(user)
+    users.append(user)
+    passwords = load_password_store()
+    passwords[email] = hash_password_for_storage(password)
+    save_user_store(users)
+    save_password_store(passwords)
+    record_audit_log(auth_user, "CREATE_STAFF_ACCOUNT", staff_audit_target(user))
     return jsonify({"ok": True, "user": user})
 
 
@@ -3931,8 +4103,10 @@ def reset_agent_password(user_id: str):
     except ValueError as exc:
         return jsonify({"error": str(exc)}), 400
     temp_password = str(data.get("temporaryPassword") or "").strip()
-    if len(temp_password) < 6:
-        return jsonify({"error": "Temporary password must be at least 6 characters."}), 400
+    try:
+        validate_password_strength(temp_password, label="Temporary password")
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
     users = load_user_store()
     user = find_user_by_id(users, user_id)
     if not user or not is_susu_agent(user):
@@ -3957,13 +4131,14 @@ def reset_agent_password(user_id: str):
     passwords[agent_password_key(active_username)] = hash_password_for_storage(temp_password)
     save_user_store(users)
     save_password_store(passwords)
+    setup_code = issue_agent_setup_code(user["id"])
     revoke_user_sessions(user_id)
     record_audit_log(
         auth_user,
         "RESET_AGENT_LOGIN",
         staff_audit_target(user, {"previousUsername": username, "temporaryUsername": active_username}),
     )
-    return jsonify({"ok": True, "user": user})
+    return jsonify({"ok": True, "user": user, "setupCode": setup_code})
 
 
 @app.route("/api/auth/register", methods=["POST", "OPTIONS"])
@@ -3971,6 +4146,8 @@ def auth_register():
     preflight = handle_options()
     if preflight:
         return preflight
+    if not email_delivery_configured():
+        return jsonify({"error": "Self-registration is unavailable. Ask the Owner Admin to create your account."}), 503
     data, error = require_json()
     if error:
         return error
@@ -3981,8 +4158,7 @@ def auth_register():
         branch = normalize_portal_branch_name(data.get("branch"))
         if not password:
             return jsonify({"error": "Password is required"}), 400
-        if len(password) < 8:
-            return jsonify({"error": "Password must be at least 8 characters"}), 400
+        validate_password_strength(password)
         if not department or not branch:
             return jsonify({"error": "SUSU category and branch are required"}), 400
         users = load_user_store()
@@ -4084,6 +4260,8 @@ def auth_resend_verification():
     preflight = handle_options()
     if preflight:
         return preflight
+    if not email_delivery_configured():
+        return jsonify({"error": "Email verification is not configured. Contact the Owner Admin."}), 503
     data, error = require_json()
     if error:
         return error
@@ -4153,6 +4331,15 @@ def auth_login():
             )
             return jsonify({"error": "Email not verified"}), 403
 
+        if bool(user.get("forcePasswordChange", False)):
+            clear_auth_failures(limit_key)
+            return jsonify({
+                "ok": True,
+                "requiresPasswordChange": True,
+                "email": email,
+                "message": "Replace the temporary password before continuing.",
+            })
+
         if not is_secure_password_hash(stored_password):
             passwords[email] = hash_password_for_storage(password)
             save_password_store(passwords)
@@ -4162,9 +4349,49 @@ def auth_login():
         session_token = issue_session(user["id"])
         clear_auth_failures(limit_key)
         record_audit_log(user, "LOGIN", staff_audit_target(user))
-        return jsonify({"ok": True, "user": user, "sessionToken": session_token})
+        return session_cookie_response(user, session_token, bool(data.get("remember")))
     except ValueError as exc:
         return jsonify({"error": str(exc)}), 400
+
+
+@app.route("/api/auth/complete-password-change", methods=["POST", "OPTIONS"])
+def auth_complete_password_change():
+    preflight = handle_options()
+    if preflight:
+        return preflight
+    data, error = require_json()
+    if error:
+        return error
+    try:
+        email = validate_email(str(data.get("email", "")))
+        temporary_password = str(data.get("temporaryPassword") or "")
+        new_password = validate_password_strength(str(data.get("newPassword") or ""), label="New password")
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+    users = load_user_store()
+    user = find_user_by_email(users, email)
+    passwords = load_password_store()
+    stored_password = passwords.get(email)
+    if (
+        not user
+        or not bool(user.get("forcePasswordChange", False))
+        or user.get("isArchived")
+        or not user.get("isActive")
+        or not stored_password
+        or not verify_password(stored_password, temporary_password)
+    ):
+        return jsonify({"error": "Temporary login details are invalid or already used."}), 401
+    if verify_password(stored_password, new_password):
+        return jsonify({"error": "Choose a password that is different from the temporary password."}), 400
+    passwords[email] = hash_password_for_storage(new_password)
+    user["forcePasswordChange"] = False
+    user["lastSeen"] = now_ms()
+    save_user_store(users)
+    save_password_store(passwords)
+    revoke_user_sessions(user["id"])
+    session_token = issue_session(user["id"])
+    record_audit_log(user, "COMPLETE_INITIAL_PASSWORD_CHANGE", staff_audit_target(user))
+    return session_cookie_response(user, session_token, bool(data.get("remember")))
 
 
 @app.route("/api/auth/agent-login", methods=["POST", "OPTIONS"])
@@ -4207,7 +4434,7 @@ def auth_agent_login():
         session_token = issue_session(user["id"])
         clear_auth_failures(limit_key)
         record_audit_log(user, "AGENT_LOGIN", staff_audit_target(user, {"username": username}))
-        return jsonify({"ok": True, "user": user, "sessionToken": session_token})
+        return session_cookie_response(user, session_token, bool(data.get("remember")))
     except ValueError as exc:
         return jsonify({"error": str(exc)}), 400
 
@@ -4264,11 +4491,7 @@ def auth_agent_complete_setup():
         limit_key = rate_limit_key("agent-setup-complete", username)
         if auth_rate_limited(limit_key):
             return jsonify({"error": "Too many setup attempts. Please wait 15 minutes and try again."}), 429
-        if token_code != "1234":
-            record_auth_failure(limit_key)
-            return jsonify({"error": "Invalid verification token."}), 400
-        if len(new_password) < 8:
-            return jsonify({"error": "New password must be at least 8 characters."}), 400
+        validate_password_strength(new_password, label="New password")
         users = load_user_store()
         user = find_user_by_username(users, username)
         passwords = load_password_store()
@@ -4282,6 +4505,9 @@ def auth_agent_complete_setup():
         if "".join(ch for ch in str(user.get("phone") or "") if ch.isdigit()) != "".join(ch for ch in phone if ch.isdigit()):
             record_auth_failure(limit_key)
             return jsonify({"error": "Phone number does not match the supervisor record."}), 400
+        if not consume_agent_setup_code(user["id"], token_code):
+            record_auth_failure(limit_key)
+            return jsonify({"error": "Invalid or expired verification code."}), 400
         if new_username != username:
             passwords.pop(agent_password_key(username), None)
             user["loginUsername"] = new_username
@@ -4298,7 +4524,7 @@ def auth_agent_complete_setup():
             "AGENT_SETUP_COMPLETED",
             staff_audit_target(user, {"temporaryUsername": username, "permanentUsername": new_username}),
         )
-        return jsonify({"ok": True, "user": user, "sessionToken": session_token})
+        return session_cookie_response(user, session_token, bool(data.get("remember")))
     except ValueError as exc:
         return jsonify({"error": str(exc)}), 400
 
@@ -4310,14 +4536,22 @@ def auth_logout():
         return preflight
     token, auth_user, error = require_authenticated_user()
     if error:
-        return error
+        return clear_session_cookie(jsonify({"ok": True}))
     set_user_last_seen(auth_user["id"], now_ms())
     store = prune_presence(load_presence_store())
     store.pop(auth_user["id"], None)
     save_presence_store(store)
     revoke_session(token)
     record_audit_log(auth_user, "LOGOUT", staff_audit_target(auth_user))
-    return jsonify({"ok": True})
+    return clear_session_cookie(jsonify({"ok": True}))
+
+
+@app.route("/api/auth/me", methods=["GET"])
+def auth_me():
+    _, auth_user, error = require_authenticated_user()
+    if error:
+        return error
+    return jsonify({"ok": True, "user": auth_user})
 
 
 @app.route("/api/auth/request-password-reset", methods=["POST", "OPTIONS"])
@@ -4325,6 +4559,8 @@ def auth_request_password_reset():
     preflight = handle_options()
     if preflight:
         return preflight
+    if not email_delivery_configured():
+        return jsonify({"error": "Password reset email is not configured. Contact the Owner Admin."}), 503
     data, error = require_json()
     if error:
         return error
@@ -4374,8 +4610,10 @@ def auth_password_reset():
         return jsonify({"error": "token is required"}), 400
     if not new_password:
         return jsonify({"error": "Password is required"}), 400
-    if len(new_password) < 8:
-        return jsonify({"error": "Password must be at least 8 characters"}), 400
+    try:
+        validate_password_strength(new_password, label="New password")
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
 
     tokens = load_reset_tokens()
     entry = tokens.get(token)
@@ -5381,4 +5619,3 @@ def serve_frontend(path: str):
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", "4185")))
-

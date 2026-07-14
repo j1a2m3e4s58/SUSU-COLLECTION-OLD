@@ -58,10 +58,11 @@ export default function Register() {
   const passwordsMatch = password && confirmPassword && password === confirmPassword;
   const passwordsMismatch = password && confirmPassword && password !== confirmPassword;
   const passwordRules = [
-    { label: "8+ Characters", valid: password.length >= 8 },
+    { label: "10+ Characters", valid: password.length >= 10 },
     { label: "Uppercase (A-Z)", valid: /[A-Z]/.test(password) },
     { label: "Small Letters (a-z)", valid: /[a-z]/.test(password) },
-    { label: "Number/Symbol @1", valid: /[\d\W_]/.test(password) },
+    { label: "Number (0-9)", valid: /\d/.test(password) },
+    { label: "Symbol (!@#)", valid: /[^A-Za-z0-9]/.test(password) },
   ];
 
   const update = (key, value) => setForm((current) => ({ ...current, [key]: value }));
@@ -190,7 +191,7 @@ export default function Register() {
       )}
 
       <form onSubmit={handleRegister} className="space-y-1.5">
-        <div className="grid grid-cols-2 gap-2">
+        <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
           <div className="min-w-0 space-y-1">
             <Label htmlFor="fullname" className="text-[9px] font-bold uppercase tracking-widest text-muted-foreground">
               Full Name
@@ -277,7 +278,7 @@ export default function Register() {
                 onChange={(e) => setPassword(e.target.value)}
                 className="h-8 rounded-lg glass-input pr-10 text-sm"
                 autoComplete="new-password"
-                minLength={8}
+                minLength={10}
                 required
               />
               <button
@@ -303,7 +304,7 @@ export default function Register() {
                 onChange={(e) => setConfirmPassword(e.target.value)}
                 className="h-8 rounded-lg glass-input pr-10 text-sm"
                 autoComplete="new-password"
-                minLength={8}
+                minLength={10}
                 required
               />
               <button

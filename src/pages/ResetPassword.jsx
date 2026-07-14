@@ -115,12 +115,12 @@ export default function ResetPassword() {
             <Input
               id="new-password"
               type={showPassword ? "text" : "password"}
-              placeholder="At least 8 characters"
+              placeholder="10+ chars with upper/lowercase, number and symbol"
               value={newPassword}
               onChange={(e) => setNewPassword(e.target.value)}
               className="h-12 glass-input pl-10 pr-10"
               autoComplete="new-password"
-              minLength={8}
+              minLength={10}
               required
             />
             <button

@@ -1,11 +1,45 @@
 import React, { useState, useEffect } from 'react';
-import * as XLSX from 'xlsx';
-import { createAgentAccount, createAuditLog, deleteStaff, exportBackup, getActiveStaff, getCollections, getPortalSettings, importCustomers, reopenDailyCollections, resetAgentPassword, updateStaff } from '@/api/portalClient';
+import { archiveStaff, createAgentAccount, getActiveStaff, getCollections, getPortalSettings, importCustomers, reopenDailyCollections, resetAgentPassword, updateStaff } from '@/api/portalClient';
 import ControlledSelect from '@/components/ui/controlled-select';
 import { useAuth } from '@/lib/AuthContext';
 import { useWorkDate } from '@/lib/WorkDateContext';
 import { exportHtmlPdf } from '@/lib/pdfExport';
-import { UserCog, Search, Building2, X, AlertCircle, Loader2, Trash2, FileText, Download, Plus, Upload, KeyRound, LockKeyhole } from 'lucide-react';
+import { UserCog, Search, Building2, X, AlertCircle, Loader2, Archive, FileText, Download, Plus, Upload, KeyRound, LockKeyhole } from 'lucide-react';
+
+const parseCsvTable = (text) => {
+  const rows = [];
+  let row = [];
+  let value = '';
+  let quoted = false;
+  for (let index = 0; index < text.length; index += 1) {
+    const character = text[index];
+    if (character === '"' && quoted && text[index + 1] === '"') {
+      value += '"';
+      index += 1;
+    } else if (character === '"') {
+      quoted = !quoted;
+    } else if (character === ',' && !quoted) {
+      row.push(value);
+      value = '';
+    } else if ((character === '\n' || character === '\r') && !quoted) {
+      if (character === '\r' && text[index + 1] === '\n') index += 1;
+      row.push(value);
+      if (row.some((cell) => String(cell).trim())) rows.push(row);
+      row = [];
+      value = '';
+    } else {
+      value += character;
+    }
+  }
+  row.push(value);
+  if (row.some((cell) => String(cell).trim())) rows.push(row);
+  return rows;
+};
+
+const tableToObjects = (table) => {
+  const [headers = [], ...rows] = table;
+  return rows.map((row) => Object.fromEntries(headers.map((header, index) => [String(header).trim(), row[index] ?? ''])));
+};
 
 export default function AgentManagement() {
   const { user } = useAuth();
@@ -24,8 +58,6 @@ export default function AgentManagement() {
   const [error, setError] = useState('');
   const [success, setSuccess] = useState('');
   const [confirmDelete, setConfirmDelete] = useState(false);
-  const [deleteBackupReady, setDeleteBackupReady] = useState(false);
-  const [exportingBackup, setExportingBackup] = useState(false);
   const [showCreateAgent, setShowCreateAgent] = useState(false);
   const [showImportCustomers, setShowImportCustomers] = useState(false);
   const [resetTarget, setResetTarget] = useState(null);
@@ -99,14 +131,9 @@ export default function AgentManagement() {
   const handleTransfer = async () => {
     if (!newBranch || !reason) { setError('Please select a branch and provide a reason'); return; }
     setSaving(true); setError('');
-    const oldBranch = transferAgent.branch || transferAgent.branch_name || 'Unassigned';
     try {
       await updateStaff(transferAgent.id, {
         branch: newBranch,
-      });
-      await createAuditLog({
-        action: 'branch_switch',
-        target: `Agent ${transferAgent.fullname || transferAgent.full_name} transferred from ${oldBranch} to ${newBranch}. Reason: ${reason}`,
       });
       setSuccess(`${transferAgent.fullname || transferAgent.full_name} transferred to ${newBranch}`);
       setTransferAgent(null); setNewBranch(''); setReason('');
@@ -139,24 +166,15 @@ export default function AgentManagement() {
   };
 
   const handleDeleteSelected = async () => {
-    if (!deleteBackupReady) {
-      setError('Export a backup before deleting agents.');
-      return;
-    }
     const selectedAgents = staff.filter((agent) => selectedIds.has(agent.id));
     if (selectedAgents.length === 0) return;
     setDeletingSelected(true);
     setError('');
     try {
-      await Promise.all(selectedAgents.map((agent) => deleteStaff(agent.id)));
-      await createAuditLog({
-        action: 'agent_bulk_delete',
-        target: `Deleted agents: ${selectedAgents.map((agent) => agent.fullname || agent.full_name).join(', ')}`,
-      });
+      await Promise.all(selectedAgents.map((agent) => archiveStaff(agent.id)));
       setStaff((current) => current.filter((agent) => !selectedIds.has(agent.id)));
       setSelectedIds(new Set());
-      setDeleteBackupReady(false);
-      setSuccess(`${selectedAgents.length} agent(s) deleted from the system.`);
+      setSuccess(`${selectedAgents.length} agent(s) archived. They can be restored from Users & Access.`);
       setTimeout(() => setSuccess(''), 4000);
     } catch (err) {
       setError(err.message || 'Failed to delete selected agents.');
@@ -193,29 +211,6 @@ export default function AgentManagement() {
     });
   };
 
-  const exportDeleteBackup = async () => {
-    setExportingBackup(true);
-    setError('');
-    try {
-      const backup = await exportBackup();
-      const blob = new Blob([JSON.stringify(backup.data, null, 2)], { type: 'application/json' });
-      const url = URL.createObjectURL(blob);
-      const link = document.createElement('a');
-      link.href = url;
-      link.download = backup.filename || `bawjiase-portal-backup-${Date.now()}.json`;
-      document.body.appendChild(link);
-      link.click();
-      link.remove();
-      URL.revokeObjectURL(url);
-      setDeleteBackupReady(true);
-      setSuccess('Backup exported. You can now delete the selected agent(s).');
-    } catch (err) {
-      setError(err.message || 'Could not export backup before delete.');
-    } finally {
-      setExportingBackup(false);
-    }
-  };
-
   const handleCreateAgent = async () => {
     if (!agentForm.username || !agentForm.temporaryPassword || !agentForm.phone || !agentForm.branch) {
       setError('Enter username, temporary password, phone, and branch.');
@@ -224,12 +219,11 @@ export default function AgentManagement() {
     setSaving(true);
     setError('');
     try {
-      await createAgentAccount(agentForm);
-      setSuccess(`Agent ${agentForm.username} added. They can now use Agent username login.`);
+      const created = await createAgentAccount(agentForm);
+      setSuccess(`Agent ${agentForm.username} added. One-time setup code: ${created.setupCode}. It expires in 30 minutes.`);
       setShowCreateAgent(false);
       setAgentForm({ fullname: '', username: '', temporaryPassword: '', phone: '', branch: scopedBranches[0] || '' });
       await refreshData();
-      setTimeout(() => setSuccess(''), 5000);
     } catch (err) {
       setError(err.message || 'Could not add agent.');
     } finally {
@@ -245,13 +239,12 @@ export default function AgentManagement() {
     setSaving(true);
     setError('');
     try {
-      await resetAgentPassword(resetTarget.id, resetPassword.trim(), resetUsername.trim());
-      setSuccess(`Temporary login reset for ${resetTarget.fullname || resetTarget.full_name}.`);
+      const updated = await resetAgentPassword(resetTarget.id, resetPassword.trim(), resetUsername.trim());
+      setSuccess(`Temporary login reset for ${resetTarget.fullname || resetTarget.full_name}. One-time setup code: ${updated.setupCode}. It expires in 30 minutes.`);
       setResetTarget(null);
       setResetUsername('');
       setResetPassword('');
       await refreshData();
-      setTimeout(() => setSuccess(''), 5000);
     } catch (err) {
       setError(err.message || 'Could not reset password.');
     } finally {
@@ -297,12 +290,14 @@ export default function AgentManagement() {
   };
 
   const downloadCustomerTemplate = () => {
-    const worksheet = XLSX.utils.json_to_sheet([
-      { 'Account Name': 'TEST AMA MENSAH', 'Account Number': '131000100001', Branch: scopedBranches[0] || 'BAWJIASE' },
-    ]);
-    const workbook = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(workbook, worksheet, 'Customer Template');
-    XLSX.writeFile(workbook, 'susu_customer_import_template.xlsx');
+    const branch = String(scopedBranches[0] || 'BAWJIASE').replaceAll('"', '""');
+    const csv = `Account Name,Account Number,Branch\r\nTEST AMA MENSAH,1310000100001,"${branch}"\r\n`;
+    const url = URL.createObjectURL(new Blob([`\uFEFF${csv}`], { type: 'text/csv;charset=utf-8' }));
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = 'susu_customer_import_template.csv';
+    link.click();
+    URL.revokeObjectURL(url);
   };
 
   const handleImportFile = async (event) => {
@@ -312,10 +307,14 @@ export default function AgentManagement() {
     setImportSummary(null);
     setError('');
     try {
-      const buffer = await file.arrayBuffer();
-      const workbook = XLSX.read(buffer, { type: 'array' });
-      const sheet = workbook.Sheets[workbook.SheetNames[0]];
-      const parsedRows = XLSX.utils.sheet_to_json(sheet, { defval: '' })
+      let sourceRows;
+      if (file.name.toLowerCase().endsWith('.csv')) {
+        sourceRows = tableToObjects(parseCsvTable(await file.text().then((text) => text.replace(/^\uFEFF/, ''))));
+      } else {
+        const { default: readXlsxFile } = await import('read-excel-file/browser');
+        sourceRows = tableToObjects(await readXlsxFile(file));
+      }
+      const parsedRows = sourceRows
         .map((row, index) => normalizeImportRow(row, index + 2));
       const validRows = parsedRows.filter((row) => row.errors.length === 0);
       const invalidRows = parsedRows.filter((row) => row.errors.length > 0);
@@ -379,16 +378,11 @@ export default function AgentManagement() {
               <Upload className="h-4 w-4" />
               Import Customers
             </button>
-            <button onClick={exportDeleteBackup} disabled={exportingBackup}
-              className="inline-flex items-center justify-center gap-2 rounded-lg border border-border bg-card px-4 py-2 text-sm font-medium text-foreground hover:bg-muted disabled:opacity-50">
-              {exportingBackup ? <Loader2 className="h-4 w-4 animate-spin" /> : <Download className="h-4 w-4" />}
-              Export Backup
-            </button>
             {selectedIds.size > 0 && (
-              <button onClick={() => { setDeleteBackupReady(false); setConfirmDelete(true); }} disabled={deletingSelected}
-                className="inline-flex items-center justify-center gap-2 rounded-lg bg-red-600 px-4 py-2 text-sm font-medium text-white hover:bg-red-700 disabled:opacity-50">
-                {deletingSelected ? <Loader2 className="h-4 w-4 animate-spin" /> : <Trash2 className="h-4 w-4" />}
-                Delete Selected ({selectedIds.size})
+              <button onClick={() => setConfirmDelete(true)} disabled={deletingSelected}
+                className="inline-flex items-center justify-center gap-2 rounded-lg bg-amber-600 px-4 py-2 text-sm font-medium text-white hover:bg-amber-700 disabled:opacity-50">
+                {deletingSelected ? <Loader2 className="h-4 w-4 animate-spin" /> : <Archive className="h-4 w-4" />}
+                Archive Selected ({selectedIds.size})
               </button>
             )}
             <button onClick={exportAgentsPdf}
@@ -515,28 +509,19 @@ export default function AgentManagement() {
                 <Trash2 className="h-5 w-5" />
               </div>
               <div>
-                <h2 className="font-heading text-lg font-bold text-foreground">Delete selected agents?</h2>
-                <p className="mt-1 text-sm text-muted-foreground">This clears their login so they can sign up again.</p>
+                <h2 className="font-heading text-lg font-bold text-foreground">Archive selected agents?</h2>
+                <p className="mt-1 text-sm text-muted-foreground">Their access will be revoked and the records can be restored later.</p>
               </div>
             </div>
             <div className="rounded-xl border border-red-500/20 bg-red-500/10 p-3 text-sm text-red-500">
-              {selectedIds.size} agent(s) selected. This action cannot be undone.
-            </div>
-            <div className="mt-3 rounded-xl border border-blue-500/20 bg-blue-500/10 p-3 text-sm text-muted-foreground">
-              Export a backup before deleting so staff, customers, collections, and audit records can be restored if needed.
-              {deleteBackupReady && <span className="mt-1 block font-medium text-emerald-500">Backup exported for this delete action.</span>}
+              {selectedIds.size} agent(s) selected. Their historical collection records will remain available.
             </div>
             <div className="mt-5 flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
               <button type="button" onClick={() => setConfirmDelete(false)} className="rounded-lg border border-border px-4 py-2 text-sm font-medium text-foreground hover:bg-muted">Cancel</button>
-              <button type="button" onClick={exportDeleteBackup} disabled={exportingBackup}
-                className="inline-flex items-center justify-center gap-2 rounded-lg border border-blue-500/30 px-4 py-2 text-sm font-medium text-blue-500 hover:bg-blue-500/10 disabled:opacity-50">
-                {exportingBackup ? <Loader2 className="h-4 w-4 animate-spin" /> : <Download className="h-4 w-4" />}
-                Export Backup
-              </button>
-              <button type="button" onClick={async () => { setConfirmDelete(false); await handleDeleteSelected(); }} disabled={!deleteBackupReady || deletingSelected}
-                className="inline-flex items-center justify-center gap-2 rounded-lg bg-red-600 px-4 py-2 text-sm font-medium text-white hover:bg-red-700 disabled:opacity-50">
-                {deletingSelected ? <Loader2 className="h-4 w-4 animate-spin" /> : <Trash2 className="h-4 w-4" />}
-                Delete
+              <button type="button" onClick={async () => { setConfirmDelete(false); await handleDeleteSelected(); }} disabled={deletingSelected}
+                className="inline-flex items-center justify-center gap-2 rounded-lg bg-amber-600 px-4 py-2 text-sm font-medium text-white hover:bg-amber-700 disabled:opacity-50">
+                {deletingSelected ? <Loader2 className="h-4 w-4 animate-spin" /> : <Archive className="h-4 w-4" />}
+                Archive
               </button>
             </div>
           </div>
@@ -558,10 +543,10 @@ export default function AgentManagement() {
               <input className={inputClass} value={agentForm.fullname} onChange={(e) => setAgentForm({ ...agentForm, fullname: e.target.value })} placeholder="Agent full name" />
               <input className={inputClass} value={agentForm.username} onChange={(e) => setAgentForm({ ...agentForm, username: e.target.value })} placeholder="Username e.g. gabriel01" />
               <input className={inputClass} value={agentForm.phone} onChange={(e) => setAgentForm({ ...agentForm, phone: e.target.value })} placeholder="Phone number used for verification" />
-              <input className={inputClass} value={agentForm.temporaryPassword} onChange={(e) => setAgentForm({ ...agentForm, temporaryPassword: e.target.value })} placeholder="Temporary password" />
+              <input type="password" minLength={10} autoComplete="new-password" className={inputClass} value={agentForm.temporaryPassword} onChange={(e) => setAgentForm({ ...agentForm, temporaryPassword: e.target.value })} placeholder="10+ chars: upper/lowercase, number and symbol" />
               <ControlledSelect value={agentForm.branch} onChange={(branch) => setAgentForm({ ...agentForm, branch })} options={scopedBranches} placeholder="Select branch" className={inputClass} />
               <div className="rounded-lg border border-blue-500/20 bg-blue-500/10 p-3 text-xs text-muted-foreground">
-                First login will ask the agent for this phone number, token 1234, then their permanent password.
+                First login asks for this phone number and the generated six-digit setup code, then requires a strong permanent password. Share the code privately; it expires in 30 minutes.
               </div>
               <div className="flex gap-3 pt-2">
                 <button onClick={() => setShowCreateAgent(false)} className="flex-1 rounded-lg bg-muted py-2.5 text-sm font-medium text-foreground hover:bg-muted/70">Cancel</button>
@@ -595,8 +580,8 @@ export default function AgentManagement() {
               <label className="flex cursor-pointer flex-col items-center justify-center rounded-xl border border-dashed border-border bg-muted/30 p-5 text-center hover:bg-muted/50">
                 <Upload className="mb-2 h-6 w-6 text-blue-500" />
                 <span className="text-sm font-medium text-foreground">{importFileName || 'Choose CSV / Excel file'}</span>
-                <span className="mt-1 text-xs text-muted-foreground">{importRows.length || importInvalidRows.length ? `${importRows.length} valid, ${importInvalidRows.length} skipped` : 'Accepted: .csv, .xlsx, .xls'}</span>
-                <input type="file" accept=".csv,.xlsx,.xls" onChange={handleImportFile} className="hidden" />
+                <span className="mt-1 text-xs text-muted-foreground">{importRows.length || importInvalidRows.length ? `${importRows.length} valid, ${importInvalidRows.length} skipped` : 'Accepted: .csv and .xlsx'}</span>
+                <input type="file" accept=".csv,.xlsx" onChange={handleImportFile} className="hidden" />
               </label>
               {importRows.length > 0 && (
                 <div className="max-h-36 overflow-y-auto rounded-lg border border-emerald-500/30 bg-emerald-500/10 p-2 text-xs">
@@ -647,7 +632,7 @@ export default function AgentManagement() {
             <div className="space-y-3">
               <input className={inputClass} value={resetUsername} onChange={(e) => setResetUsername(e.target.value)} placeholder="Temporary username" />
               <input className={inputClass} value={resetPassword} onChange={(e) => setResetPassword(e.target.value)} placeholder="New temporary password" />
-              <p className="text-xs text-muted-foreground">The agent logs in with this temporary username/password, verifies phone + token 1234, then sets their permanent username and password.</p>
+              <p className="text-xs text-muted-foreground">The agent logs in with this temporary username/password, verifies their phone and the one-time setup code, then sets a permanent username and password.</p>
               <div className="flex gap-3 pt-2">
                 <button onClick={() => setResetTarget(null)} className="flex-1 rounded-lg bg-muted py-2.5 text-sm font-medium text-foreground hover:bg-muted/70">Cancel</button>
                 <button onClick={handleResetAgentPassword} disabled={saving || !resetUsername || !resetPassword} className="flex flex-1 items-center justify-center gap-2 rounded-lg bg-amber-600 py-2.5 text-sm font-medium text-white hover:bg-amber-700 disabled:opacity-50">

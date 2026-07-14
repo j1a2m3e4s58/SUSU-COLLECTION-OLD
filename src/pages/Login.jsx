@@ -12,9 +12,10 @@ import { Eye, EyeOff, Loader2 } from "lucide-react";
 
 export default function Login() {
   const navigate = useNavigate();
-  const { login, loginAgent, completeAgentFirstLogin, portalSettings } = useAuth();
+  const { login, loginAgent, completeAgentFirstLogin, completeStaffFirstLogin, portalSettings } = useAuth();
   const [mode, setMode] = useState("staff");
   const [setupStep, setSetupStep] = useState(false);
+  const [staffSetupStep, setStaffSetupStep] = useState(false);
   const [setupStage, setSetupStage] = useState("phone");
   const [email, setEmail] = useState("");
   const [username, setUsername] = useState("");
@@ -23,6 +24,7 @@ export default function Login() {
   const [token, setToken] = useState("");
   const [newUsername, setNewUsername] = useState("");
   const [newPassword, setNewPassword] = useState("");
+  const [confirmNewPassword, setConfirmNewPassword] = useState("");
   const [showPassword, setShowPassword] = useState(false);
   const [rememberMe, setRememberMe] = useState(true);
   const [loading, setLoading] = useState(false);
@@ -49,7 +51,13 @@ export default function Login() {
     e.preventDefault();
     setLoading(true);
     try {
-      await login(email, password);
+      const result = await login(email, password, rememberMe);
+      if (result?.requiresPasswordChange) {
+        setNewPassword("");
+        setConfirmNewPassword("");
+        setStaffSetupStep(true);
+        return;
+      }
       navigate("/", { replace: true });
     } catch (err) {
       showError(err.message || "Invalid email or password");
@@ -62,7 +70,7 @@ export default function Login() {
     e.preventDefault();
     setLoading(true);
     try {
-      const result = await loginAgent(username, password);
+      const result = await loginAgent(username, password, rememberMe);
       if (result?.requiresSetup) {
         setNewUsername(username);
         setPhone("");
@@ -100,11 +108,10 @@ export default function Login() {
 
   const handleVerifyToken = (e) => {
     e.preventDefault();
-    if (String(token).trim() !== "1234") {
-      showError("Invalid verification token.");
+    if (!/^\d{6}$/.test(String(token).trim())) {
+      showError("Enter the six-digit one-time setup code from your supervisor.");
       return;
     }
-    showSuccess("Token accepted. Set your permanent login details.");
     setSetupStage("reset");
   };
 
@@ -119,11 +126,35 @@ export default function Login() {
         phone,
         token,
         newPassword,
+        remember: rememberMe,
       });
       showSuccess("Agent setup completed. Signing you in now.");
       navigate("/", { replace: true });
     } catch (err) {
       showError(err.message || "Could not complete agent setup");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleStaffPasswordChange = async (e) => {
+    e.preventDefault();
+    if (newPassword !== confirmNewPassword) {
+      showError("The new passwords do not match.");
+      return;
+    }
+    setLoading(true);
+    try {
+      await completeStaffFirstLogin({
+        email,
+        temporaryPassword: password,
+        newPassword,
+        remember: rememberMe,
+      });
+      showSuccess("Password changed. Signing you in now.");
+      navigate("/", { replace: true });
+    } catch (err) {
+      showError(err.message || "Could not replace the temporary password.");
     } finally {
       setLoading(false);
     }
@@ -209,12 +240,14 @@ export default function Login() {
               Remember me
             </Label>
           </div>
-          <Link
-            to="/forgot-password"
-            className="shrink-0 text-muted-foreground transition-smooth hover:text-primary"
-          >
-            Forgot?
-          </Link>
+          {portalSettings?.emailEnabled && (
+            <Link
+              to="/forgot-password"
+              className="shrink-0 text-muted-foreground transition-smooth hover:text-primary"
+            >
+              Forgot?
+            </Link>
+          )}
         </div>
 
         <Button
@@ -286,12 +319,14 @@ export default function Login() {
         >
           {mode === "staff" ? "Agent username login" : "Back to staff email login"}
         </button>
-        <p className="text-sm text-muted-foreground">
-          New Staff?{" "}
-          <Link to="/register" className="font-medium text-primary transition-smooth hover:text-primary/80">
-            Sign Up
-          </Link>
-        </p>
+        {portalSettings?.emailEnabled && (
+          <p className="text-sm text-muted-foreground">
+            New Staff?{" "}
+            <Link to="/register" className="font-medium text-primary transition-smooth hover:text-primary/80">
+              Sign Up
+            </Link>
+          </p>
+        )}
         <p className="mt-1 text-xs text-muted-foreground">
           {portalSettings?.authorizedAccessText || "Authorized access only"}
         </p>
@@ -310,7 +345,7 @@ export default function Login() {
             </h2>
             <p className="mt-1 text-xs leading-5 text-muted-foreground">
               {setupStage === "phone" && "Enter the phone number your supervisor recorded."}
-              {setupStage === "token" && "Enter the verification token. Test token is 1234 until SMS is connected."}
+              {setupStage === "token" && "Enter the six-digit one-time setup code your supervisor shared with you."}
               {setupStage === "reset" && "Choose your permanent username and password."}
             </p>
           </div>
@@ -322,7 +357,7 @@ export default function Login() {
                 <Input id="agent-phone" value={phone} onChange={(e) => setPhone(e.target.value)} className="h-10 glass-input text-sm" placeholder="024..." required autoFocus />
               </div>
               <Button type="submit" className="h-10 w-full glass-button text-sm font-bold uppercase tracking-[0.14em]" disabled={loading || !phone}>
-                {loading ? <><Loader2 className="mr-2 h-4 w-4 animate-spin" /> Checking...</> : "Get Verification Token"}
+                {loading ? <><Loader2 className="mr-2 h-4 w-4 animate-spin" /> Checking...</> : "Verify Contact"}
               </Button>
             </form>
           )}
@@ -330,8 +365,8 @@ export default function Login() {
           {setupStage === "token" && (
             <form onSubmit={handleVerifyToken} className="space-y-3">
               <div className="space-y-1">
-                <Label htmlFor="agent-token" className="text-[9px] font-bold uppercase tracking-widest text-muted-foreground">Verification Token</Label>
-                <Input id="agent-token" value={token} onChange={(e) => setToken(e.target.value)} className="h-10 glass-input text-sm" placeholder="1234" required autoFocus />
+                <Label htmlFor="agent-token" className="text-[9px] font-bold uppercase tracking-widest text-muted-foreground">One-Time Setup Code</Label>
+                <Input id="agent-token" value={token} onChange={(e) => setToken(e.target.value.replace(/\D/g, "").slice(0, 6))} className="h-10 glass-input text-sm" inputMode="numeric" autoComplete="one-time-code" maxLength={6} placeholder="6-digit code" required autoFocus />
               </div>
               <Button type="submit" className="h-10 w-full glass-button text-sm font-bold uppercase tracking-[0.14em]" disabled={!token}>
                 Continue
@@ -347,7 +382,8 @@ export default function Login() {
               </div>
               <div className="space-y-1">
                 <Label htmlFor="agent-new-password" className="text-[9px] font-bold uppercase tracking-widest text-muted-foreground">Permanent Password</Label>
-                <Input id="agent-new-password" type="password" value={newPassword} onChange={(e) => setNewPassword(e.target.value)} className="h-10 glass-input text-sm" minLength={8} required />
+                <Input id="agent-new-password" type="password" value={newPassword} onChange={(e) => setNewPassword(e.target.value)} className="h-10 glass-input text-sm" minLength={10} autoComplete="new-password" required />
+                <p className="text-[11px] leading-4 text-muted-foreground">At least 10 characters with uppercase, lowercase, a number, and a symbol.</p>
               </div>
               <Button type="submit" className="h-10 w-full glass-button text-sm font-bold uppercase tracking-[0.14em]" disabled={loading || !newUsername || !newPassword}>
                 {loading ? <><Loader2 className="mr-2 h-4 w-4 animate-spin" /> Saving...</> : "Save And Login"}
@@ -358,6 +394,32 @@ export default function Login() {
           <button type="button" onClick={closeSetup} className="mt-3 w-full rounded-lg border border-border px-3 py-2 text-sm font-medium text-muted-foreground hover:bg-muted">
             Cancel
           </button>
+        </div>
+      </div>
+    )}
+    {staffSetupStep && (
+      <div className="fixed inset-0 z-50 flex items-center justify-center px-4 py-6">
+        <div className="absolute inset-0 bg-black/60 backdrop-blur-sm" />
+        <div className="relative w-full max-w-sm rounded-2xl border border-primary/20 bg-background/95 p-5 shadow-2xl backdrop-blur-xl">
+          <div className="mb-4 text-center">
+            <p className="page-kicker text-center">Secure your account</p>
+            <h2 className="mt-1 font-display text-xl font-bold text-foreground">Replace Temporary Password</h2>
+            <p className="mt-1 text-xs leading-5 text-muted-foreground">Choose a permanent password before entering the portal.</p>
+          </div>
+          <form onSubmit={handleStaffPasswordChange} className="space-y-3">
+            <div className="space-y-1">
+              <Label htmlFor="staff-new-password">New Password</Label>
+              <Input id="staff-new-password" type="password" value={newPassword} onChange={(event) => setNewPassword(event.target.value)} minLength={10} autoComplete="new-password" required autoFocus />
+            </div>
+            <div className="space-y-1">
+              <Label htmlFor="staff-confirm-password">Confirm New Password</Label>
+              <Input id="staff-confirm-password" type="password" value={confirmNewPassword} onChange={(event) => setConfirmNewPassword(event.target.value)} minLength={10} autoComplete="new-password" required />
+            </div>
+            <p className="text-[11px] leading-4 text-muted-foreground">At least 10 characters with uppercase, lowercase, a number, and a symbol.</p>
+            <Button type="submit" className="h-10 w-full glass-button" disabled={loading || !newPassword || !confirmNewPassword}>
+              {loading ? <><Loader2 className="mr-2 h-4 w-4 animate-spin" /> Saving...</> : "Change Password And Login"}
+            </Button>
+          </form>
         </div>
       </div>
     )}

@@ -4,11 +4,9 @@ Use this before real operational testing.
 
 ## Roles And Access
 
-- Log in as OwnerAdmin, SuperAdmin, HRAdmin, Supervisor, General Staff, and SUSU AGENT.
-- Confirm only OwnerAdmin can see/open Portal Control and Past Staff.
-- Confirm HRAdmin and SuperAdmin cannot open `/portal-control` or `/past-staff` directly.
-- Confirm only OwnerAdmin can delete audit logs and export backup.
-- Confirm SuperAdmin/HRAdmin can still manage directory, branches view, agents, reports, and audit viewing.
+- Log in separately as Owner Admin, Supervisor, General Staff, and SUSU Agent.
+- Confirm only Owner Admin can open Portal Control, encrypted backups, supervisor access, and archived staff.
+- Confirm audit records can be viewed but cannot be created, changed, or deleted from the client.
 - Confirm supervisors see only assigned branch operational data.
 - Confirm General Staff cannot see admin, supervisor, owner, or collection-entry controls.
 - Confirm only SUSU AGENT users can open Field Collection and create deposits.
@@ -32,7 +30,7 @@ Use this before real operational testing.
 - Confirm all staff can view directory cards by department.
 - Confirm Add User opens registration and is mobile-friendly.
 - Confirm only allowed admin roles can edit/remove users.
-- Confirm OwnerAdmin/SuperAdmin cannot be archived or permanently removed.
+- Confirm Owner Admin cannot be archived or permanently removed.
 - Confirm archive/remove/delete dialogs are styled app dialogs, not browser popups.
 - Confirm profile image, online dot, email wrapping, and card height work at 400px.
 
@@ -42,7 +40,7 @@ Use this before real operational testing.
 - Assign a supervisor to one branch and selected departments.
 - Confirm supervisor can view only branch-relevant customers, collections, transactions, reports, and approvals.
 - Confirm Agent Management only lists `SUSU AGENT` department staff.
-- Test agent reassignment, delete selected, and PDF export.
+- Test agent reassignment, archive selected, restore from Users & Access, and PDF export.
 
 ## Reports And Exports
 
@@ -63,13 +61,15 @@ Use this before real operational testing.
 ## Backup And Recovery
 
 - Log in as OwnerAdmin and export backup before serious testing.
-- Confirm backup JSON downloads.
-- Store backup outside the app folder before test data changes.
+- Confirm an encrypted `.json` backup downloads and contains no readable user/password data.
+- Store the backup and its passphrase separately outside the app folder.
 
 ## Final Smoke Test
 
 - Run `python -m py_compile mail-api/app.py`.
+- Run `python -m unittest discover -s mail-api/tests -v`.
 - Run `npm run lint`.
+- Run `npm run typecheck` and `npm audit --audit-level=moderate`.
 - Run `npm run build`.
 - Confirm frontend returns HTTP 200.
 - Confirm backend `/api/health` returns `{"ok":true}`.

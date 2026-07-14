@@ -105,12 +105,12 @@ export default function Header({ onMenuClick, user }) {
       { title: 'Customers', subtitle: 'Active customer management', path: '/customers', type: 'Page', icon: Users },
       { title: 'Inactive Customers', subtitle: 'Restore inactive customers', path: '/inactive-customers', type: 'Page', icon: UserX },
     ] : []),
-    { title: 'Directory', subtitle: 'Staff directory and presence', path: '/directory', type: 'Page', icon: Contact },
+    { title: 'Users & Access', subtitle: 'Staff directory and account access', path: '/directory', type: 'Page', icon: Contact },
     { title: 'Transactions', subtitle: 'Collection transaction history', path: '/transactions', type: 'Page', icon: Receipt },
     { title: 'Reports', subtitle: 'Reports and exports', path: '/reports', type: 'Page', icon: Search },
     ...(canAdmin ? [
       { title: 'Branches', subtitle: 'Branch management', path: '/branches', type: 'Page', icon: LayoutDashboard },
-      { title: 'Supervisor Management', subtitle: 'Assign supervisor scopes', path: '/supervisor-management', type: 'Page', icon: Contact },
+      { title: 'Supervisor Access', subtitle: 'Assign supervisor scopes', path: '/directory?tab=supervisors', type: 'Page', icon: Contact },
       { title: 'Audit Log', subtitle: 'System audit trail', path: '/audit-log', type: 'Page', icon: Receipt },
     ] : []),
     ...(canManageCustomers ? [
@@ -118,7 +118,7 @@ export default function Header({ onMenuClick, user }) {
     ] : []),
     ...(canOwnerControl ? [
       { title: 'Portal Control', subtitle: 'Owner system settings', path: '/portal-control', type: 'Page', icon: LayoutDashboard },
-      { title: 'Past Staff', subtitle: 'Archived staff records', path: '/past-staff', type: 'Page', icon: UserX },
+      { title: 'Archived Staff', subtitle: 'Restore archived staff records', path: '/directory?tab=archived', type: 'Page', icon: UserX },
     ] : []),
   ];
 
@@ -257,8 +257,9 @@ export default function Header({ onMenuClick, user }) {
           </span>
           <button
             onClick={toggleTheme}
-            className="p-2 rounded-lg hover:bg-muted text-foreground transition-colors"
+            className="hidden p-2 rounded-lg hover:bg-muted text-foreground transition-colors sm:inline-flex"
             title="Toggle theme"
+            aria-label="Toggle theme"
           >
             {theme === 'dark' ? <Sun className="w-5 h-5" /> : <Moon className="w-5 h-5" />}
           </button>
@@ -266,6 +267,7 @@ export default function Header({ onMenuClick, user }) {
             to="/notifications"
             className="relative p-2 rounded-lg hover:bg-muted text-foreground transition-colors"
             title="Notifications"
+            aria-label="Notifications"
           >
             <Bell className="w-5 h-5" />
             {unreadCount > 0 && (

@@ -16,13 +16,13 @@ import {
   clearTestData,
   exportBackup,
   getPortalSettings,
-  getStoredPortalControlPassword,
   importBackup,
   removeTestCustomers,
   seedTestCustomers,
   updatePortalSettings,
 } from "@/api/portalClient";
 import { useAuth } from "@/lib/AuthContext";
+import { decryptBackup, encryptBackup } from "@/lib/secureBackup";
 import { Building2, Download, ListPlus, Plus, RotateCcw, Save, Settings2, Trash2, Upload, X } from "lucide-react";
 
 const listControls = [
@@ -37,7 +37,6 @@ const textFields = [
   ["loginSubtitle", "Login Subtitle"],
   ["loginButtonText", "Login Button Text"],
   ["authorizedAccessText", "Authorized Access Text"],
-  ["portalControlPassword", "Portal Control Password"],
 ];
 
 const labelFields = [
@@ -175,6 +174,7 @@ export default function PortalControl() {
   const [clearBackupReady, setClearBackupReady] = useState(false);
   const [error, setError] = useState("");
   const [success, setSuccess] = useState("");
+  const [backupPassphrase, setBackupPassphrase] = useState("");
 
   useEffect(() => {
     let mounted = true;
@@ -201,11 +201,6 @@ export default function PortalControl() {
   };
 
   const saveSettings = async () => {
-    const password = getStoredPortalControlPassword();
-    if (!password) {
-      setError("Open Portal Control from the sidebar and enter the password first.");
-      return;
-    }
     if ((settings?.appMode || "test") !== "live" && draft.appMode === "live" && !clearBackupReady) {
       setError("Export a backup before switching the portal to Live Mode.");
       return;
@@ -228,7 +223,7 @@ export default function PortalControl() {
     setError("");
     setSuccess("");
     try {
-      const updated = await updatePortalSettings(payload, password);
+      const updated = await updatePortalSettings(payload);
       setSettings(updated);
       setDraft(updated);
       await refreshPortalSettings?.();
@@ -253,15 +248,17 @@ export default function PortalControl() {
     setError("");
     setSuccess("");
     try {
+      if (backupPassphrase.length < 12) throw new Error("Enter a backup passphrase of at least 12 characters.");
       const backup = await exportBackup();
-      const blob = new Blob([JSON.stringify(backup.data, null, 2)], { type: "application/json" });
+      const encrypted = await encryptBackup(backup.data, backupPassphrase);
+      const blob = new Blob([JSON.stringify(encrypted, null, 2)], { type: "application/json" });
       const link = document.createElement("a");
       link.href = URL.createObjectURL(blob);
-      link.download = backup.filename;
+      link.download = backup.filename.replace(/\.json$/i, ".susubackup.json");
       link.click();
       URL.revokeObjectURL(link.href);
       setClearBackupReady(true);
-      setSuccess("Backup export prepared.");
+      setSuccess("Encrypted backup exported. Keep the passphrase separate from the file.");
     } catch (err) {
       setError(err.message || "Could not export backup.");
     } finally {
@@ -277,15 +274,17 @@ export default function PortalControl() {
     setError("");
     setSuccess("");
     try {
+      if (backupPassphrase.length < 12) throw new Error("Enter the backup passphrase before importing.");
       const text = await file.text();
-      const parsed = JSON.parse(text);
+      const encrypted = JSON.parse(text);
+      const parsed = await decryptBackup(encrypted, backupPassphrase);
       const response = await importBackup(parsed);
       if (response.settings) {
         setSettings(response.settings);
         setDraft(response.settings);
       }
       await refreshPortalSettings?.();
-      setSuccess("Backup imported successfully. Refresh other open tabs before continuing.");
+      setSuccess("Backup imported successfully. For security, sign in again before continuing.");
     } catch (err) {
       setError(err.message || "Could not import backup file.");
     } finally {
@@ -379,7 +378,7 @@ export default function PortalControl() {
         </div>
         <div className="flex flex-wrap gap-2">
           {hasUnsavedChanges && <Badge variant="secondary">Unsaved changes</Badge>}
-          <Button type="button" variant="outline" className="gap-2" onClick={downloadBackup} disabled={exporting} title="Export a full JSON backup before testing">
+          <Button type="button" variant="outline" className="gap-2" onClick={downloadBackup} disabled={exporting} title="Export an encrypted backup before testing">
             <Download className="h-4 w-4" />
             {exporting ? "Exporting..." : "Export Backup"}
           </Button>
@@ -414,6 +413,14 @@ export default function PortalControl() {
             </p>
           </div>
           <div className="flex flex-wrap gap-2">
+            <Input
+              type="password"
+              value={backupPassphrase}
+              onChange={(event) => setBackupPassphrase(event.target.value)}
+              placeholder="Backup passphrase (12+ characters)"
+              autoComplete="new-password"
+              className="min-w-[260px] bg-background/70"
+            />
             <ControlledSelect
               value={draft.appMode || "test"}
               onChange={(value) => update("appMode", value)}
@@ -431,7 +438,7 @@ export default function PortalControl() {
             <label className="inline-flex cursor-pointer items-center gap-2 rounded-lg border border-border bg-background/70 px-4 py-2 text-sm font-medium text-foreground hover:bg-muted">
               <Upload className="h-4 w-4" />
               {importing ? "Importing..." : "Import Backup"}
-              <input type="file" accept="application/json,.json" className="hidden" onChange={uploadBackup} disabled={importing} />
+              <input type="file" accept="application/json,.json,.susubackup" className="hidden" onChange={uploadBackup} disabled={importing} />
             </label>
             <Button type="button" variant="outline" className="gap-2 bg-background/70" onClick={loadTestCustomers} disabled={seedingCustomers || draft.appMode !== "test"}>
               <ListPlus className="h-4 w-4" />
@@ -459,7 +466,7 @@ export default function PortalControl() {
             ["Backup", "Export a full backup before Live Mode and before deleting records."],
             ["Roles", "Test Owner, Supervisor, and SUSU AGENT accounts separately."],
             ["Imports", "Upload customer CSV/Excel with 13-digit account numbers only."],
-            ["Storage", "Confirm Render has persistent disk or a real database before real deposits."],
+            ["Storage", "Confirm /api/health reports PostgreSQL before recording real deposits."],
           ].map(([title, text]) => (
             <div key={title} className="rounded-xl border border-border bg-background/60 p-3">
               <p className="text-sm font-semibold text-foreground">{title}</p>

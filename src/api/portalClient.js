@@ -1,25 +1,15 @@
-import { getSessionToken } from "@/api/authClient";
-
 const API_ROOT = (import.meta.env.VITE_MAIL_API_URL || "/mail-api/api").replace(/\/$/, "");
-export const PORTAL_CONTROL_PASSWORD_KEY = "susu.portalControlPassword";
 
-export function getStoredPortalControlPassword() {
-  if (typeof window === "undefined") return "";
-  return window.sessionStorage.getItem(PORTAL_CONTROL_PASSWORD_KEY) || "";
-}
-
-export function setStoredPortalControlPassword(password) {
-  if (typeof window === "undefined") return;
-  window.sessionStorage.setItem(PORTAL_CONTROL_PASSWORD_KEY, password);
-}
-
+/**
+ * @param {string} path
+ * @param {{ method?: string, body?: unknown }} options
+ */
 async function apiRequest(path, { method = "GET", body } = {}) {
-  const token = getSessionToken();
   const response = await fetch(`${API_ROOT}${path}`, {
     method,
+    credentials: "include",
     headers: {
       "Content-Type": "application/json",
-      ...(token ? { Authorization: `Bearer ${token}` } : {}),
     },
     ...(body ? { body: JSON.stringify(body) } : {}),
   });
@@ -27,6 +17,7 @@ async function apiRequest(path, { method = "GET", body } = {}) {
   if (!response.ok) {
     if (response.status === 401 && /session|unauthorized/i.test(data.error || "")) {
       localStorage.removeItem("susu_auth_user");
+      sessionStorage.removeItem("susu_auth_user");
       if (typeof window !== "undefined" && !window.location.pathname.includes("/login")) {
         window.location.href = "/login";
       }
@@ -34,6 +25,11 @@ async function apiRequest(path, { method = "GET", body } = {}) {
     throw new Error(data.error || "Request failed");
   }
   return data;
+}
+
+export async function getSystemHealth() {
+  const data = await apiRequest("/health");
+  return Boolean(data.ok);
 }
 
 export function normalizeUser(user) {
@@ -80,13 +76,10 @@ export async function getPortalSettings() {
   return data.settings;
 }
 
-export async function updatePortalSettings(settings, password = getStoredPortalControlPassword()) {
+export async function updatePortalSettings(settings) {
   const data = await apiRequest("/portal-settings", {
     method: "POST",
-    body: {
-      ...settings,
-      password,
-    },
+    body: settings,
   });
   return data.settings;
 }
@@ -132,6 +125,14 @@ export async function createAgentAccount(payload) {
     method: "POST",
     body: payload,
   });
+  return { ...normalizeUser(data.user), setupCode: data.setupCode };
+}
+
+export async function createStaffUser(payload) {
+  const data = await apiRequest("/users/create", {
+    method: "POST",
+    body: payload,
+  });
   return normalizeUser(data.user);
 }
 
@@ -140,7 +141,7 @@ export async function resetAgentPassword(userId, temporaryPassword, temporaryUse
     method: "POST",
     body: { temporaryPassword, temporaryUsername },
   });
-  return normalizeUser(data.user);
+  return { ...normalizeUser(data.user), setupCode: data.setupCode };
 }
 
 export async function deleteStaff(userId) {
@@ -218,34 +219,9 @@ export async function getAuditLogs() {
   return data.logs || [];
 }
 
-export async function createAuditLog(payload) {
-  const data = await apiRequest("/audit-logs", {
-    method: "POST",
-    body: payload,
-  });
-  return data.log;
-}
-
-export async function deleteAuditLog(itemId) {
-  return apiRequest(`/audit-logs/${itemId}/delete`, {
-    method: "POST",
-    body: {},
-  });
-}
-
-export async function deleteAuditLogs(itemIds) {
-  return apiRequest("/audit-logs/delete", {
-    method: "POST",
-    body: { ids: itemIds },
-  });
-}
-
 export async function exportBackup() {
-  const token = getSessionToken();
   const response = await fetch(`${API_ROOT}/backup/export`, {
-    headers: {
-      ...(token ? { Authorization: `Bearer ${token}` } : {}),
-    },
+    credentials: "include",
   });
   const data = await response.json().catch(() => ({}));
   if (!response.ok) {
@@ -257,13 +233,10 @@ export async function exportBackup() {
   };
 }
 
-export async function importBackup(payload, password = getStoredPortalControlPassword()) {
+export async function importBackup(payload) {
   return apiRequest("/backup/import", {
     method: "POST",
-    body: {
-      ...payload,
-      password,
-    },
+    body: payload,
   });
 }
 
@@ -359,14 +332,11 @@ export async function logoutPresence(userId) {
 }
 
 export async function uploadProfilePhoto(file) {
-  const token = getSessionToken();
   const formData = new FormData();
   formData.append("file", file);
   const response = await fetch(`${API_ROOT}/uploads/profile-photo`, {
     method: "POST",
-    headers: {
-      ...(token ? { Authorization: `Bearer ${token}` } : {}),
-    },
+    credentials: "include",
     body: formData,
   });
   const data = await response.json().catch(() => ({}));

@@ -1,43 +1,28 @@
-import React, { useState } from 'react';
-import { Link, useLocation, useNavigate } from 'react-router-dom';
+import React, { useEffect, useState } from 'react';
+import { Link, useLocation } from 'react-router-dom';
 import {
   LayoutDashboard, HandCoins, Users, Receipt, BarChart3,
-  UserCog, Building2, ScrollText, UserCircle, Contact, SlidersHorizontal, UserX
+  UserCog, Building2, ScrollText, UserCircle, Contact, SlidersHorizontal
 } from 'lucide-react';
-import { Button } from '@/components/ui/button';
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from '@/components/ui/dialog';
-import { Input } from '@/components/ui/input';
-import { Label } from '@/components/ui/label';
-import { setStoredPortalControlPassword } from '@/api/portalClient';
+import { getSystemHealth } from '@/api/portalClient';
 
 export const navItems = [
   { label: 'Dashboard', path: '/', icon: LayoutDashboard },
   { label: 'Field Collection', path: '/field-collection', icon: HandCoins, agentOnly: true },
   { label: 'Customers', path: '/customers', icon: Users, customerManagerOnly: true },
-  { label: 'Directory', path: '/directory', icon: Contact },
+  { label: 'Users & Access', path: '/directory', icon: Contact },
   { label: 'Transactions', path: '/transactions', icon: Receipt },
   { label: 'Reports', path: '/reports', icon: BarChart3 },
-  { label: 'Agents', path: '/agents', icon: UserCog, agentManagerOnly: true },
+  { label: 'Agent Operations', path: '/agents', icon: UserCog, agentManagerOnly: true },
   { label: 'Branches', path: '/branches', icon: Building2, managerOnly: true },
-  { label: 'Past Staff', path: '/past-staff', icon: UserX, ownerOnly: true },
-  { label: 'Portal Control', path: '/portal-control', icon: SlidersHorizontal, portalControl: true, ownerOnly: true },
+  { label: 'Portal Control', path: '/portal-control', icon: SlidersHorizontal, ownerOnly: true },
   { label: 'Audit Log', path: '/audit-log', icon: ScrollText, managerOnly: true },
   { label: 'Profile', path: '/profile', icon: UserCircle },
 ];
 
 export default function Sidebar({ isOpen, onClose, user, settings }) {
   const location = useLocation();
-  const navigate = useNavigate();
-  const [unlockOpen, setUnlockOpen] = useState(false);
-  const [password, setPassword] = useState("");
-  const [unlockError, setUnlockError] = useState("");
+  const [systemOnline, setSystemOnline] = useState(null);
 
   const canManagePortal = user?.role === 'OwnerAdmin';
   const canOwnerControl = user?.role === 'OwnerAdmin';
@@ -54,23 +39,18 @@ export default function Sidebar({ isOpen, onClose, user, settings }) {
     return item.label;
   };
 
-  const handlePortalControl = (event) => {
-    event.preventDefault();
-    setPassword("");
-    setUnlockError("");
-    setUnlockOpen(true);
-  };
-
-  const handleUnlock = () => {
-    if (password.trim().toUpperCase() !== 'T4N4AMEG8F52468') {
-      setUnlockError('Portal control password is incorrect.');
-      return;
-    }
-    setStoredPortalControlPassword(password.trim());
-    setUnlockOpen(false);
-    onClose?.();
-    navigate('/portal-control');
-  };
+  useEffect(() => {
+    let mounted = true;
+    const check = () => getSystemHealth()
+      .then((online) => mounted && setSystemOnline(online))
+      .catch(() => mounted && setSystemOnline(false));
+    check();
+    const interval = window.setInterval(check, 30000);
+    return () => {
+      mounted = false;
+      window.clearInterval(interval);
+    };
+  }, []);
 
   return (
     <>
@@ -102,7 +82,7 @@ export default function Sidebar({ isOpen, onClose, user, settings }) {
             const isActive = location.pathname === item.path;
             const Icon = item.icon;
             return (
-              <Link key={item.path} to={item.path} onClick={item.portalControl ? handlePortalControl : onClose}
+              <Link key={item.path} to={item.path} onClick={onClose}
                 className={`flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium transition-all ${isActive
                   ? 'bg-blue-600 text-white shadow-lg shadow-blue-600/25'
                   : 'text-muted-foreground hover:bg-sidebar-accent hover:text-foreground'
@@ -115,43 +95,13 @@ export default function Sidebar({ isOpen, onClose, user, settings }) {
         </nav>
         <div className="p-4 border-t border-sidebar-border">
           <div className="flex items-center gap-2 px-2">
-            <div className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
-            <span className="text-xs text-muted-foreground">System Online</span>
+            <div className={`h-2 w-2 rounded-full ${systemOnline === true ? 'bg-emerald-500' : systemOnline === false ? 'bg-red-500' : 'bg-amber-500'}`} />
+            <span className="text-xs text-muted-foreground">
+              {systemOnline === true ? 'System Online' : systemOnline === false ? 'System Offline' : 'Checking System'}
+            </span>
           </div>
         </div>
       </aside>
-      <Dialog open={unlockOpen} onOpenChange={setUnlockOpen}>
-        <DialogContent className="w-[calc(100vw-2rem)] max-w-[360px] rounded-xl p-5 sm:max-w-md sm:p-6">
-          <DialogHeader>
-            <DialogTitle>Enter Portal Control Password</DialogTitle>
-            <DialogDescription>
-              Unlock SUSU system settings before making system-wide changes.
-            </DialogDescription>
-          </DialogHeader>
-          <div className="space-y-2">
-            <Label htmlFor="portal-control-password">Password</Label>
-            <Input
-              id="portal-control-password"
-              type="password"
-              value={password}
-              onChange={(event) => setPassword(event.target.value)}
-              onKeyDown={(event) => {
-                if (event.key === 'Enter') handleUnlock();
-              }}
-              autoFocus
-            />
-            {unlockError && <p className="text-sm text-destructive">{unlockError}</p>}
-          </div>
-          <DialogFooter className="gap-2 sm:gap-0">
-            <Button type="button" variant="outline" className="w-full sm:w-auto" onClick={() => setUnlockOpen(false)}>
-              Cancel
-            </Button>
-            <Button type="button" className="w-full sm:w-auto" onClick={handleUnlock}>
-              Unlock
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
     </>
   );
 }

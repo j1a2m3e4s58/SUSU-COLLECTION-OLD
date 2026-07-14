@@ -34,9 +34,11 @@ dist-ssr
 mail-api/*_store.json
 mail-api/pending_verifications.json
 mail-api/reset_tokens.json
+mail-api/agent_setup_tokens.json
 mail-api/sessions_store.json
 mail-api/password_store.json
 mail-api/presence_store.json
 mail-api/uploads/
+mail-api/data/
 mail-api/__pycache__/
 *.pyc

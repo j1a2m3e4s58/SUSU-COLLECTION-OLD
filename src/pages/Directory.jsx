@@ -1,5 +1,4 @@
 import React, { useEffect, useMemo, useState } from "react";
-import { Link } from "react-router-dom";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -17,6 +16,7 @@ import ControlledSelect from "@/components/ui/controlled-select";
 import {
   archiveStaff,
   createAgentAccount,
+  createStaffUser,
   deleteStaff,
   getActiveStaff,
   getPortalSettings,
@@ -24,7 +24,7 @@ import {
   updateStaff,
 } from "@/api/portalClient";
 import { useAuth } from "@/lib/AuthContext";
-import { Archive, Building2, Loader2, Mail, MapPin, Phone, Search, ShieldCheck, Trash2, UserPlus, UserX, Users } from "lucide-react";
+import { Archive, Building2, Loader2, Mail, MapPin, Phone, Search, ShieldCheck, Trash2, UserPlus, Users } from "lucide-react";
 
 function initials(name) {
   return String(name || "User")
@@ -166,7 +166,9 @@ export default function Directory() {
   const [showAddAgent, setShowAddAgent] = useState(false);
   const [addingAgent, setAddingAgent] = useState(false);
   const [agentForm, setAgentForm] = useState({
+    accountType: "agent",
     fullname: "",
+    email: "",
     username: "",
     temporaryPassword: "",
     phone: "",
@@ -292,20 +294,27 @@ export default function Directory() {
   };
 
   const handleAddAgent = async () => {
-    if (!agentForm.username || !agentForm.temporaryPassword || !agentForm.phone || !agentForm.branch) {
-      setError("Enter username, temporary password, phone, and branch.");
+    const isAgent = agentForm.accountType === "agent";
+    if (!(isAgent ? agentForm.username : agentForm.email) || !agentForm.temporaryPassword || !agentForm.phone || !agentForm.branch || !agentForm.fullname) {
+      setError(`Enter full name, ${isAgent ? "username" : "email"}, temporary password, phone, and branch.`);
       return;
     }
     setAddingAgent(true);
     setError("");
     setSuccess("");
     try {
-      const created = await createAgentAccount(agentForm);
+      const created = isAgent
+        ? await createAgentAccount(agentForm)
+        : await createStaffUser({ ...agentForm, role: agentForm.accountType === "supervisor" ? "Supervisor" : "GeneralStaff" });
       setStaff((current) => [created, ...current.filter((member) => member.id !== created.id)]);
-      setSuccess(`${created.fullname || created.loginUsername || "Agent"} has been added.`);
+      setSuccess(isAgent
+        ? `${created.fullname || created.loginUsername || "Agent"} has been added. One-time setup code: ${created.setupCode}. It expires in 30 minutes.`
+        : `${created.fullname} has been added and can sign in with their official email and temporary password.`);
       setShowAddAgent(false);
       setAgentForm({
+        accountType: "agent",
         fullname: "",
+        email: "",
         username: "",
         temporaryPassword: "",
         phone: "",
@@ -335,22 +344,6 @@ export default function Directory() {
         </div>
         {(canOwnerControl || canAddAgentUser) && (
           <div className="flex flex-wrap gap-2">
-            {canOwnerControl && (
-              <Link to="/past-staff">
-                <Button variant="outline" className="gap-2">
-                  <UserX className="h-4 w-4" />
-                  Past Staff
-                </Button>
-              </Link>
-            )}
-            {canOwnerControl && (
-              <Link to="/supervisor-management">
-                <Button className="gap-2">
-                  <ShieldCheck className="h-4 w-4" />
-                  Supervisor Management
-                </Button>
-              </Link>
-            )}
             {canAddAgentUser && (
               <Button
                 type="button"
@@ -603,13 +596,28 @@ export default function Directory() {
       <Dialog open={showAddAgent} onOpenChange={setShowAddAgent}>
         <DialogContent className="w-[calc(100vw-2rem)] max-w-md rounded-xl p-5 sm:p-6">
           <DialogHeader>
-            <DialogTitle>Add Agent User</DialogTitle>
+            <DialogTitle>Add User</DialogTitle>
             <DialogDescription>
-              Create a username and temporary password for a SUSU agent.
+              Create an agent, staff, or supervisor account with branch-scoped access.
             </DialogDescription>
           </DialogHeader>
 
           <div className="space-y-4 py-2">
+            {canOwnerControl && (
+              <div className="space-y-1.5">
+                <Label>Account Type</Label>
+                <ControlledSelect
+                  value={agentForm.accountType}
+                  onChange={(value) => setAgentForm({ ...agentForm, accountType: value })}
+                  options={[
+                    { value: "agent", label: "SUSU Agent" },
+                    { value: "staff", label: "General Staff" },
+                    { value: "supervisor", label: "Branch Supervisor" },
+                  ]}
+                  className="h-10 rounded-lg border-border bg-background text-sm"
+                />
+              </div>
+            )}
             <div className="space-y-1.5">
               <Label htmlFor="agent-fullname">Full Name</Label>
               <Input
@@ -621,12 +629,13 @@ export default function Directory() {
             </div>
             <div className="grid gap-4 sm:grid-cols-2">
               <div className="space-y-1.5">
-                <Label htmlFor="agent-username">Username</Label>
+                <Label htmlFor="agent-username">{agentForm.accountType === "agent" ? "Username" : "Official Email"}</Label>
                 <Input
                   id="agent-username"
-                  value={agentForm.username}
-                  onChange={(event) => setAgentForm({ ...agentForm, username: event.target.value })}
-                  placeholder="e.g. gabriel01"
+                  type={agentForm.accountType === "agent" ? "text" : "email"}
+                  value={agentForm.accountType === "agent" ? agentForm.username : agentForm.email}
+                  onChange={(event) => setAgentForm({ ...agentForm, [agentForm.accountType === "agent" ? "username" : "email"]: event.target.value })}
+                  placeholder={agentForm.accountType === "agent" ? "e.g. gabriel01" : "name@bawjiasecommunitybank.com"}
                 />
               </div>
               <div className="space-y-1.5">
@@ -643,9 +652,12 @@ export default function Directory() {
               <Label htmlFor="agent-temp-password">Temporary Password</Label>
               <Input
                 id="agent-temp-password"
+                type="password"
                 value={agentForm.temporaryPassword}
                 onChange={(event) => setAgentForm({ ...agentForm, temporaryPassword: event.target.value })}
-                placeholder="Temporary password"
+                placeholder="10+ characters with upper/lowercase, number and symbol"
+                minLength={10}
+                autoComplete="new-password"
               />
             </div>
             <div className="space-y-1.5">
@@ -659,7 +671,9 @@ export default function Directory() {
               />
             </div>
             <div className="rounded-lg border border-primary/20 bg-primary/10 p-3 text-xs text-muted-foreground">
-              First login will ask for this phone number, token 1234, then a permanent password.
+              {agentForm.accountType === "agent"
+                ? "Share the generated one-time setup code privately. The agent must verify their phone and choose a permanent password."
+                : "Share the temporary password privately and ask the user to change it after signing in."}
             </div>
           </div>
 
