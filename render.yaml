@@ -17,15 +17,5 @@ services:
         sync: false
       - key: ALLOWED_ORIGINS
         sync: false
-      - key: MAIL_SERVER
-        sync: false
-      - key: MAIL_PORT
-        value: 465
-      - key: MAIL_USERNAME
-        sync: false
-      - key: MAIL_PASSWORD
-        sync: false
-      - key: MAIL_DEFAULT_SENDER
-        sync: false
       - key: PORTAL_DEFAULT_INITIAL_PASSWORD
         sync: false
