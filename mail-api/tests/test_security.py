@@ -21,6 +21,10 @@ OWNER_PASSWORD = "OwnerTest#2026"
 
 class PortalSecurityTests(unittest.TestCase):
     def setUp(self):
+        users = portal.load_user_store()
+        owner = portal.find_user_by_email(users, OWNER_EMAIL)
+        owner["forcePasswordChange"] = False
+        portal.save_user_store(users)
         portal.save_password_store({
             OWNER_EMAIL: portal.hash_password_for_storage(OWNER_PASSWORD),
         })

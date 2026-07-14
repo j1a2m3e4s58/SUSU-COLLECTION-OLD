@@ -990,7 +990,9 @@ def load_user_store() -> list[dict]:
     raw = read_json_file(USERS_STORE_PATH, [])
     users_by_email = {}
     for default_user in [OWNER_ADMIN_USER, *INITIAL_USERS]:
-        normalized = normalize_user(default_user)
+        # On a brand-new deployment, every account seeded with the shared
+        # initialization password must replace it before entering the portal.
+        normalized = normalize_user({**default_user, "forcePasswordChange": True})
         users_by_email[normalized["email"]] = normalized
     if isinstance(raw, list):
         for item in raw:
