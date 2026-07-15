@@ -110,7 +110,7 @@ DEFAULT_PORTAL_SETTINGS = {
     "supportRequestTypes": [],
     "departmentChangeTypes": [],
     "transferLocations": [],
-    "loginSubtitle": "Securely manage SUSU collections, customer records, field staff operations, and branch performance reports.",
+    "loginSubtitle": "Sign in to manage SUSU collections, customers, staff, and branch reports.",
     "loginButtonText": "Secure Login",
     "authorizedAccessText": "Authorized Access Only",
     "appMode": "test",
@@ -1240,9 +1240,6 @@ def load_portal_settings_store() -> dict:
     raw = read_json_file(PORTAL_SETTINGS_STORE_PATH, {})
     if not isinstance(raw, dict):
         raw = {}
-    login_subtitle = str(raw.get("loginSubtitle") or DEFAULT_PORTAL_SETTINGS["loginSubtitle"]).strip()
-    if login_subtitle == "Sign in to manage SUSU collections, customers, staff, and branch reports.":
-        login_subtitle = DEFAULT_PORTAL_SETTINGS["loginSubtitle"]
     return {
         "bankName": str(raw.get("bankName") or DEFAULT_PORTAL_SETTINGS["bankName"]).strip(),
         "shortBankName": str(raw.get("shortBankName") or DEFAULT_PORTAL_SETTINGS["shortBankName"]).strip(),
@@ -1256,7 +1253,7 @@ def load_portal_settings_store() -> dict:
         "supportRequestTypes": [],
         "departmentChangeTypes": [],
         "transferLocations": [],
-        "loginSubtitle": login_subtitle,
+        "loginSubtitle": str(raw.get("loginSubtitle") or DEFAULT_PORTAL_SETTINGS["loginSubtitle"]),
         "loginButtonText": str(raw.get("loginButtonText") or DEFAULT_PORTAL_SETTINGS["loginButtonText"]),
         "authorizedAccessText": str(raw.get("authorizedAccessText") or DEFAULT_PORTAL_SETTINGS["authorizedAccessText"]),
         "sessionDays": normalize_positive_number(raw.get("sessionDays"), DEFAULT_PORTAL_SETTINGS["sessionDays"]),

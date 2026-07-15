@@ -248,14 +248,12 @@ export default function Login() {
               Remember me
             </Label>
           </div>
-          {portalSettings?.emailEnabled && (
-            <Link
-              to="/forgot-password"
-              className="shrink-0 text-muted-foreground transition-smooth hover:text-primary"
-            >
-              Forgot?
-            </Link>
-          )}
+          <Link
+            to="/forgot-password"
+            className="shrink-0 text-muted-foreground transition-smooth hover:text-primary"
+          >
+            Forgot?
+          </Link>
         </div>
 
         {mfaRequired && (
@@ -334,7 +332,6 @@ export default function Login() {
         >
           {mode === "staff" ? "Agent username login" : "Back to staff email login"}
         </button>
-        <div className="h-5" aria-hidden="true" />
         <p className="mt-1 text-xs text-muted-foreground">
           {portalSettings?.authorizedAccessText || "Authorized access only"}
         </p>
