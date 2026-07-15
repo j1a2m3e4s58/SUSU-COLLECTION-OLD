@@ -31,7 +31,9 @@ class PortalSecurityTests(unittest.TestCase):
         portal.atomic_write_json(portal.SESSIONS_STORE_PATH, {})
         portal.atomic_write_json(portal.AGENT_SETUP_TOKENS_PATH, {})
         portal.atomic_write_json(portal.AUDIT_LOGS_STORE_PATH, [])
+        portal.atomic_write_json(portal.NOTIFICATIONS_STORE_PATH, [])
         portal.atomic_write_json(portal.CUSTOMERS_STORE_PATH, [])
+        portal.atomic_write_json(portal.CUSTOMER_IMPORT_HISTORY_STORE_PATH, [])
         portal.atomic_write_json(portal.COLLECTIONS_STORE_PATH, [])
         portal.atomic_write_json(portal.DAILY_CLOSES_STORE_PATH, [])
         portal.atomic_write_json(portal.RATE_LIMIT_STORE_PATH, {})
@@ -299,6 +301,45 @@ class PortalSecurityTests(unittest.TestCase):
     def test_audit_log_mutations_are_disabled(self):
         self.assertEqual(self.client.post("/api/audit-logs", json={}).status_code, 405)
         self.assertEqual(self.client.post("/api/audit-logs/delete", json={}).status_code, 405)
+
+    def test_customer_import_creates_scoped_batch_history(self):
+        self.assertEqual(self.login_owner().status_code, 200)
+        imported = self.client.post("/api/customers/import", json={
+            "branch": "BAWJIASE",
+            "fileName": "July Customers.xlsx",
+            "customers": [{
+                "account_name": "Import Customer",
+                "account_number": "1310000100888",
+                "branch": "BAWJIASE",
+            }],
+            "skippedRows": [{"row": 3, "reason": "Account name missing"}],
+        })
+        self.assertEqual(imported.status_code, 200)
+        batch = imported.get_json()["batch"]
+        self.assertEqual(batch["fileName"], "July_Customers.xlsx")
+        self.assertEqual(batch["createdCount"], 1)
+        self.assertEqual(batch["skippedCount"], 1)
+        history = self.client.get("/api/customers/import-history")
+        self.assertEqual(history.status_code, 200)
+        self.assertEqual(history.get_json()["history"][0]["id"], batch["id"])
+
+    def test_queried_collection_notifies_the_agent(self):
+        agent, customer = self.create_agent_and_customer()
+        self.client.post("/api/auth/login", json={"email": agent["email"], "passwordHash": "AgentStrong#2026"})
+        deposit = self.client.post("/api/collections", json={
+            "customer_id": customer["id"],
+            "amount": "12.00",
+            "idempotency_key": "correction-notification-test-01",
+        }).get_json()["collection"]
+        self.client.post("/api/auth/logout", json={})
+        self.assertEqual(self.login_owner().status_code, 200)
+        queried = self.client.post(f"/api/collections/{deposit['id']}/review", json={
+            "supervisor_review_status": "queried",
+            "correction_note": "Please verify the receipt reference.",
+        })
+        self.assertEqual(queried.status_code, 200)
+        notices = portal.load_json_list_store(portal.NOTIFICATIONS_STORE_PATH)
+        self.assertTrue(any(item.get("userId") == agent["id"] and item.get("kind") == "correction" for item in notices))
 
     def test_cross_origin_mutation_is_blocked(self):
         response = self.client.post(

@@ -190,6 +190,11 @@ export async function importCustomers(payload) {
   });
 }
 
+export async function getCustomerImportHistory() {
+  const data = await apiRequest("/customers/import-history");
+  return data.history || [];
+}
+
 export async function updateCustomer(customerId, payload) {
   const data = await apiRequest(`/customers/${customerId}`, {
     method: "POST",

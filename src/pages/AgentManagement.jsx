@@ -1,10 +1,10 @@
 import React, { useState, useEffect } from 'react';
-import { archiveStaff, createAgentAccount, getActiveStaff, getCollections, getDailyCloseStatus, getPortalSettings, importCustomers, reopenDailyCollections, resetAgentPassword, reviewDailyClose, updateStaff } from '@/api/portalClient';
+import { archiveStaff, createAgentAccount, getActiveStaff, getCollections, getCustomerImportHistory, getDailyCloseStatus, getPortalSettings, importCustomers, reopenDailyCollections, resetAgentPassword, reviewDailyClose, updateStaff } from '@/api/portalClient';
 import ControlledSelect from '@/components/ui/controlled-select';
 import { useAuth } from '@/lib/AuthContext';
 import { useWorkDate } from '@/lib/WorkDateContext';
 import { exportHtmlPdf } from '@/lib/pdfExport';
-import { UserCog, Search, Building2, X, AlertCircle, Loader2, Archive, FileText, Download, Plus, Upload, KeyRound, LockKeyhole, CheckCircle2 } from 'lucide-react';
+import { UserCog, Search, Building2, X, AlertCircle, Loader2, Archive, FileText, Download, Plus, Upload, KeyRound, LockKeyhole, CheckCircle2, History } from 'lucide-react';
 
 const parseCsvTable = (text) => {
   const rows = [];
@@ -71,6 +71,8 @@ export default function AgentManagement() {
   const [importInvalidRows, setImportInvalidRows] = useState([]);
   const [importFileName, setImportFileName] = useState('');
   const [importSummary, setImportSummary] = useState(null);
+  const [importHistory, setImportHistory] = useState([]);
+  const [importHistoryLoading, setImportHistoryLoading] = useState(false);
 
   const isOwner = user?.role === 'OwnerAdmin';
   const supervisorBranches = Array.isArray(user?.managedBranches) && user.managedBranches.length
@@ -104,6 +106,15 @@ export default function AgentManagement() {
   };
 
   useEffect(() => { refreshData().catch(() => setLoading(false)); }, [user?.id]);
+
+  const refreshImportHistory = async () => {
+    setImportHistoryLoading(true);
+    try {
+      setImportHistory(await getCustomerImportHistory());
+    } finally {
+      setImportHistoryLoading(false);
+    }
+  };
 
   const filtered = staff.filter(s => {
     const q = search.toLowerCase().trim();
@@ -361,13 +372,21 @@ export default function AgentManagement() {
     setSaving(true);
     setError('');
     try {
-      const result = await importCustomers({ branch: importBranch, customers: importRows });
+      const result = await importCustomers({
+        branch: importBranch,
+        fileName: importFileName,
+        customers: importRows,
+        skippedRows: importInvalidRows.map((row) => ({
+          row: row.rowNumber,
+          reason: row.errors.join(', '),
+        })),
+      });
       setImportSummary(result);
       setSuccess(`${result.createdCount || 0} customer(s) imported.`);
       setImportRows([]);
       setImportInvalidRows([]);
       setImportFileName('');
-      await refreshData();
+      await Promise.all([refreshData(), refreshImportHistory()]);
     } catch (err) {
       setError(err.message || 'Could not import customers.');
     } finally {
@@ -400,7 +419,7 @@ export default function AgentManagement() {
               <Plus className="h-4 w-4" />
               Add Agent
             </button>
-            <button onClick={() => { setShowImportCustomers(true); setError(''); }}
+            <button onClick={() => { setShowImportCustomers(true); setError(''); refreshImportHistory().catch(() => setImportHistory([])); }}
               className="inline-flex items-center justify-center gap-2 rounded-lg bg-cyan-600 px-4 py-2 text-sm font-medium text-white hover:bg-cyan-700">
               <Upload className="h-4 w-4" />
               Import Customers
@@ -598,7 +617,7 @@ export default function AgentManagement() {
       {showImportCustomers && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
           <div className="absolute inset-0 bg-black/60 backdrop-blur-sm" onClick={() => setShowImportCustomers(false)} />
-          <div className="relative max-h-[calc(100vh-2rem)] w-full max-w-lg overflow-y-auto rounded-2xl border border-border bg-card p-5 shadow-2xl sm:p-6">
+          <div className="relative max-h-[calc(100vh-2rem)] w-full max-w-2xl overflow-y-auto rounded-2xl border border-border bg-card p-5 shadow-2xl sm:p-6">
             <div className="mb-4 flex items-center justify-between">
               <div>
                 <h2 className="font-heading text-lg font-bold text-foreground">Import Customers</h2>
@@ -641,6 +660,49 @@ export default function AgentManagement() {
                   Imported {importSummary.createdCount || 0}. Skipped {(importSummary.skipped || []).length}.
                 </div>
               )}
+              <section className="rounded-xl border border-border bg-background/45 p-3 sm:p-4">
+                <div className="mb-3 flex items-center justify-between gap-3">
+                  <div>
+                    <h3 className="flex items-center gap-2 text-sm font-semibold text-foreground"><History className="h-4 w-4 text-cyan-500" /> Import History</h3>
+                    <p className="mt-0.5 text-xs leading-5 text-muted-foreground">Permanent batch records showing the source file, uploader, date, and row results.</p>
+                  </div>
+                  <button type="button" onClick={() => refreshImportHistory().catch(() => setImportHistory([]))} disabled={importHistoryLoading} className="shrink-0 rounded-lg border border-border px-3 py-1.5 text-xs font-medium text-foreground hover:bg-muted disabled:opacity-50">
+                    {importHistoryLoading ? 'Loading...' : 'Refresh'}
+                  </button>
+                </div>
+                {!importHistoryLoading && importHistory.length === 0 && (
+                  <p className="rounded-lg bg-muted/40 px-3 py-4 text-center text-xs text-muted-foreground">No customer import batches recorded yet.</p>
+                )}
+                <div className="max-h-64 space-y-2 overflow-y-auto pr-1">
+                  {importHistory.map((batch) => (
+                    <details key={batch.id} className="group rounded-lg border border-border bg-card/70 px-3 py-2">
+                      <summary className="cursor-pointer list-none">
+                        <div className="flex flex-col justify-between gap-1 sm:flex-row sm:items-center sm:gap-3">
+                          <div className="min-w-0">
+                            <p className="truncate text-sm font-medium text-foreground">{batch.fileName || 'Customer import'}</p>
+                            <p className="text-[11px] leading-4 text-muted-foreground">{batch.uploadedBy || 'Unknown user'} · {batch.branch || 'No branch'} · {new Date(batch.createdAt || 0).toLocaleString()}</p>
+                          </div>
+                          <p className="shrink-0 text-xs font-medium"><span className="text-emerald-500">{batch.createdCount || 0} created</span><span className="mx-1 text-muted-foreground">/</span><span className="text-amber-500">{batch.skippedCount || 0} skipped</span></p>
+                        </div>
+                      </summary>
+                      <div className="mt-2 grid gap-2 border-t border-border/70 pt-2 text-xs sm:grid-cols-2">
+                        <div>
+                          <p className="mb-1 font-semibold text-emerald-500">Created rows</p>
+                          <div className="max-h-28 space-y-1 overflow-y-auto text-muted-foreground">
+                            {(batch.createdRows || []).length ? (batch.createdRows || []).map((row) => <p key={row.id}>{row.accountNumber} — {row.accountName}</p>) : <p>None</p>}
+                          </div>
+                        </div>
+                        <div>
+                          <p className="mb-1 font-semibold text-amber-500">Skipped rows</p>
+                          <div className="max-h-28 space-y-1 overflow-y-auto text-muted-foreground">
+                            {(batch.skippedRows || []).length ? (batch.skippedRows || []).map((row, index) => <p key={`${row.row || row.account_number || 'row'}-${index}`}>{row.row ? `Row ${row.row}: ` : row.account_number ? `${row.account_number}: ` : ''}{row.reason}</p>) : <p>None</p>}
+                          </div>
+                        </div>
+                      </div>
+                    </details>
+                  ))}
+                </div>
+              </section>
               <div className="flex gap-3 pt-2">
                 <button onClick={() => setShowImportCustomers(false)} className="flex-1 rounded-lg bg-muted py-2.5 text-sm font-medium text-foreground hover:bg-muted/70">Close</button>
                 <button onClick={handleImportCustomers} disabled={saving || !importRows.length} className="flex flex-1 items-center justify-center gap-2 rounded-lg bg-cyan-600 py-2.5 text-sm font-medium text-white hover:bg-cyan-700 disabled:opacity-50">

@@ -58,6 +58,7 @@ TRAINING_REMINDERS_STORE_PATH = os.path.join(DATA_DIR, "training_reminders_store
 AUDIT_LOGS_STORE_PATH = os.path.join(DATA_DIR, "audit_logs_store.json")
 PORTAL_SETTINGS_STORE_PATH = os.path.join(DATA_DIR, "portal_settings_store.json")
 CUSTOMERS_STORE_PATH = os.path.join(DATA_DIR, "customers_store.json")
+CUSTOMER_IMPORT_HISTORY_STORE_PATH = os.path.join(DATA_DIR, "customer_import_history_store.json")
 COLLECTIONS_STORE_PATH = os.path.join(DATA_DIR, "collections_store.json")
 DAILY_CLOSES_STORE_PATH = os.path.join(DATA_DIR, "daily_closes_store.json")
 RATE_LIMIT_STORE_PATH = os.path.join(DATA_DIR, "rate_limit_store.json")
@@ -109,7 +110,7 @@ DEFAULT_PORTAL_SETTINGS = {
     "supportRequestTypes": [],
     "departmentChangeTypes": [],
     "transferLocations": [],
-    "loginSubtitle": "Sign in to manage SUSU collections, customers, staff, and branch reports.",
+    "loginSubtitle": "Securely manage SUSU collections, customer records, field staff operations, and branch performance reports.",
     "loginButtonText": "Secure Login",
     "authorizedAccessText": "Authorized Access Only",
     "appMode": "test",
@@ -239,6 +240,7 @@ STORE_DEFAULTS: dict[str, object] = {
     AUDIT_LOGS_STORE_PATH: [],
     PORTAL_SETTINGS_STORE_PATH: {},
     CUSTOMERS_STORE_PATH: [],
+    CUSTOMER_IMPORT_HISTORY_STORE_PATH: [],
     COLLECTIONS_STORE_PATH: [],
     DAILY_CLOSES_STORE_PATH: [],
     RATE_LIMIT_STORE_PATH: {},
@@ -1238,6 +1240,9 @@ def load_portal_settings_store() -> dict:
     raw = read_json_file(PORTAL_SETTINGS_STORE_PATH, {})
     if not isinstance(raw, dict):
         raw = {}
+    login_subtitle = str(raw.get("loginSubtitle") or DEFAULT_PORTAL_SETTINGS["loginSubtitle"]).strip()
+    if login_subtitle == "Sign in to manage SUSU collections, customers, staff, and branch reports.":
+        login_subtitle = DEFAULT_PORTAL_SETTINGS["loginSubtitle"]
     return {
         "bankName": str(raw.get("bankName") or DEFAULT_PORTAL_SETTINGS["bankName"]).strip(),
         "shortBankName": str(raw.get("shortBankName") or DEFAULT_PORTAL_SETTINGS["shortBankName"]).strip(),
@@ -1251,7 +1256,7 @@ def load_portal_settings_store() -> dict:
         "supportRequestTypes": [],
         "departmentChangeTypes": [],
         "transferLocations": [],
-        "loginSubtitle": str(raw.get("loginSubtitle") or DEFAULT_PORTAL_SETTINGS["loginSubtitle"]),
+        "loginSubtitle": login_subtitle,
         "loginButtonText": str(raw.get("loginButtonText") or DEFAULT_PORTAL_SETTINGS["loginButtonText"]),
         "authorizedAccessText": str(raw.get("authorizedAccessText") or DEFAULT_PORTAL_SETTINGS["authorizedAccessText"]),
         "sessionDays": normalize_positive_number(raw.get("sessionDays"), DEFAULT_PORTAL_SETTINGS["sessionDays"]),
@@ -2965,6 +2970,7 @@ def export_production_backup():
             "auditLogs": load_audit_logs_store(),
             "portalSettings": load_portal_settings_store(),
             "customers": load_json_list_store(CUSTOMERS_STORE_PATH),
+            "customerImportHistory": load_json_list_store(CUSTOMER_IMPORT_HISTORY_STORE_PATH),
             "collections": load_json_list_store(COLLECTIONS_STORE_PATH),
             "dailyCloses": load_json_list_store(DAILY_CLOSES_STORE_PATH),
         },
@@ -3020,6 +3026,7 @@ def import_production_backup():
                 if str(key).strip() and is_secure_password_hash(str(value))
         }
         imported_customers = [dict(item) for item in stores.get("customers", []) if isinstance(item, dict)]
+        imported_customer_history = [dict(item) for item in stores.get("customerImportHistory", []) if isinstance(item, dict)]
         imported_collections = [dict(item) for item in stores.get("collections", []) if isinstance(item, dict)]
         imported_closes = [dict(item) for item in stores.get("dailyCloses", []) if isinstance(item, dict)]
         imported_notifications = [dict(item) for item in stores.get("notifications", []) if isinstance(item, dict)]
@@ -3049,6 +3056,7 @@ def import_production_backup():
             documents[NOTIFICATIONS_STORE_PATH] = imported_notifications
             documents[PORTAL_SETTINGS_STORE_PATH] = imported_settings
             documents[CUSTOMERS_STORE_PATH] = imported_customers
+            documents[CUSTOMER_IMPORT_HISTORY_STORE_PATH] = imported_customer_history
             documents[COLLECTIONS_STORE_PATH] = imported_collections
             documents[DAILY_CLOSES_STORE_PATH] = imported_closes
             logs = documents[AUDIT_LOGS_STORE_PATH]
@@ -3057,7 +3065,7 @@ def import_production_backup():
         mutate_store_documents(
             {
                 USERS_STORE_PATH: [], PASSWORD_STORE_PATH: {}, NOTIFICATIONS_STORE_PATH: [],
-                PORTAL_SETTINGS_STORE_PATH: {}, CUSTOMERS_STORE_PATH: [], COLLECTIONS_STORE_PATH: [],
+                PORTAL_SETTINGS_STORE_PATH: {}, CUSTOMERS_STORE_PATH: [], CUSTOMER_IMPORT_HISTORY_STORE_PATH: [], COLLECTIONS_STORE_PATH: [],
                 DAILY_CLOSES_STORE_PATH: [], AUDIT_LOGS_STORE_PATH: [],
             },
             mutate,
@@ -3525,6 +3533,23 @@ def update_customer(customer_id: str):
     return jsonify({"ok": True, "customer": customer})
 
 
+@app.route("/api/customers/import-history", methods=["GET"])
+def get_customer_import_history():
+    _, auth_user, error = require_authenticated_user()
+    if error:
+        return error
+    if not can_manage_agents_and_customers(auth_user):
+        return jsonify({"error": "Only supervisors or owner admin can view customer import history."}), 403
+    history = load_json_list_store(CUSTOMER_IMPORT_HISTORY_STORE_PATH)
+    if not is_global_manager(auth_user):
+        history = [
+            item for item in history
+            if branch_allowed_for_user(auth_user, str(item.get("branch") or ""))
+        ]
+    history.sort(key=lambda item: int(item.get("createdAt", 0) or 0), reverse=True)
+    return jsonify({"history": history[:200]})
+
+
 @app.route("/api/customers/import", methods=["POST", "OPTIONS"])
 def import_customers():
     preflight = handle_options()
@@ -3541,6 +3566,21 @@ def import_customers():
     rows = data.get("customers")
     if not isinstance(rows, list) or not rows:
         return jsonify({"error": "Upload must contain at least one customer row."}), 400
+    if len(rows) > 2000:
+        return jsonify({"error": "A single import cannot exceed 2,000 valid customer rows."}), 400
+    file_name = secure_filename(str(data.get("fileName") or "customer-import"))[:160] or "customer-import"
+    client_skipped = []
+    raw_client_skipped = data.get("skippedRows")
+    if isinstance(raw_client_skipped, list):
+        for entry in raw_client_skipped[:2000]:
+            if not isinstance(entry, dict):
+                continue
+            reason = str(entry.get("reason") or "Failed file validation").strip()[:240]
+            try:
+                row_number = max(1, int(entry.get("row") or 0))
+            except (TypeError, ValueError):
+                row_number = 0
+            client_skipped.append({"row": row_number, "reason": reason})
     try:
         import_branch = managed_branch_for_user(auth_user, data.get("branch"))
     except ValueError as exc:
@@ -3593,25 +3633,71 @@ def import_customers():
         customers.append(customer)
         existing_numbers.add(account_number)
         created.append(customer)
-    if created:
-        candidates = list(created)
-        def mutate(documents):
-            current = documents[CUSTOMERS_STORE_PATH]
-            current_numbers = {str(item.get("account_number", "")).strip() for item in current}
-            accepted = []
-            for item in candidates:
-                account_number = str(item.get("account_number", "")).strip()
-                if account_number in current_numbers:
-                    skipped.append({"account_number": account_number, "reason": "Duplicate account number"})
-                    continue
-                current.append(item)
-                current_numbers.add(account_number)
-                accepted.append(item)
-            logs = documents[AUDIT_LOGS_STORE_PATH]
-            logs.insert(0, make_audit_entry(logs, auth_user, "IMPORT_CUSTOMERS", {"branch": import_branch, "created": len(accepted), "skipped": len(skipped)}))
-            return accepted
-        created = mutate_store_documents({CUSTOMERS_STORE_PATH: [], AUDIT_LOGS_STORE_PATH: []}, mutate)
-    return jsonify({"ok": True, "created": created, "createdCount": len(created), "skipped": skipped})
+    candidates = list(created)
+    initial_skipped = [*client_skipped, *skipped]
+
+    def mutate(documents):
+        current = documents[CUSTOMERS_STORE_PATH]
+        current_numbers = {str(item.get("account_number", "")).strip() for item in current}
+        accepted = []
+        final_skipped = list(initial_skipped)
+        for item in candidates:
+            account_number = str(item.get("account_number", "")).strip()
+            if account_number in current_numbers:
+                final_skipped.append({"account_number": account_number, "reason": "Duplicate account number"})
+                continue
+            current.append(item)
+            current_numbers.add(account_number)
+            accepted.append(item)
+        batch = {
+            "id": f"customer-import-{now_ms()}-{secrets.token_hex(3)}",
+            "fileName": file_name,
+            "branch": import_branch,
+            "uploadedBy": auth_user["fullname"],
+            "uploadedById": auth_user["id"],
+            "uploadedByEmail": auth_user["email"],
+            "createdAt": now_ms(),
+            "sourceRowCount": len(rows) + len(client_skipped),
+            "createdCount": len(accepted),
+            "skippedCount": len(final_skipped),
+            "createdRows": [
+                {
+                    "id": item["id"],
+                    "accountName": item["account_name"],
+                    "accountNumber": item["account_number"],
+                }
+                for item in accepted
+            ],
+            "skippedRows": final_skipped,
+        }
+        import_history = documents[CUSTOMER_IMPORT_HISTORY_STORE_PATH]
+        import_history.insert(0, batch)
+        del import_history[200:]
+        logs = documents[AUDIT_LOGS_STORE_PATH]
+        logs.insert(0, make_audit_entry(logs, auth_user, "IMPORT_CUSTOMERS", {
+            "branch": import_branch,
+            "fileName": file_name,
+            "batchId": batch["id"],
+            "created": len(accepted),
+            "skipped": len(final_skipped),
+        }))
+        return accepted, final_skipped, batch
+
+    created, skipped, batch = mutate_store_documents(
+        {
+            CUSTOMERS_STORE_PATH: [],
+            CUSTOMER_IMPORT_HISTORY_STORE_PATH: [],
+            AUDIT_LOGS_STORE_PATH: [],
+        },
+        mutate,
+    )
+    return jsonify({
+        "ok": True,
+        "created": created,
+        "createdCount": len(created),
+        "skipped": skipped,
+        "batch": batch,
+    })
 
 
 @app.route("/api/collections", methods=["GET"])
@@ -3852,13 +3938,15 @@ def review_collection(collection_id: str):
     except ValueError as exc:
         return jsonify({"error": str(exc)}), 400
     if status == "queried" and item.get("agent_id"):
-        create_notifications_for_users(
-            [str(item.get("agent_id"))],
-            kind="correction",
-            title="Correction requested",
-            message=f"{auth_user['fullname']} requested a correction for {item.get('account_name', 'a transaction')}: {note}",
-            link_to="/transactions",
-        )
+        agent = find_user_by_id(load_user_store(), str(item.get("agent_id")))
+        if agent:
+            create_notifications_for_users(
+                [agent],
+                kind="correction",
+                title="Correction requested",
+                message=f"{auth_user['fullname']} requested a correction for {item.get('account_name', 'a transaction')}: {note}",
+                link_to="/transactions",
+            )
     return jsonify({"ok": True, "collection": item})
 
 
