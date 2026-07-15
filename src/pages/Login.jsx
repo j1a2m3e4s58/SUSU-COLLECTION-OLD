@@ -175,13 +175,13 @@ export default function Login() {
 
   return (
     <>
-    <AuthLayout className="flex min-h-0 max-w-[420px] flex-col justify-center px-5 pb-6 pt-16 sm:px-6 sm:pb-7 sm:pt-16">
-      <div className="mb-5 space-y-1.5 text-center">
+    <AuthLayout className="flex min-h-0 max-w-[420px] flex-col justify-center px-5 pb-5 pt-16 sm:px-5 sm:pb-6 sm:pt-16">
+      <div className="mb-4 space-y-1 text-center">
         <div className="page-kicker text-center">Secure staff access</div>
         <h1 className="font-display text-2xl font-bold text-foreground">
           {portalSettings?.portalName || "SUSU Workspace"}
         </h1>
-        <p className="mx-auto max-w-[19rem] text-xs leading-[1.65] text-muted-foreground">
+        <p className="mx-auto max-w-[17rem] text-xs leading-5 text-muted-foreground">
           {portalSettings?.loginSubtitle || "Sign in with your official email account"}
         </p>
       </div>
@@ -334,19 +334,7 @@ export default function Login() {
         >
           {mode === "staff" ? "Agent username login" : "Back to staff email login"}
         </button>
-        {portalSettings?.selfRegistrationEnabled && (
-          <p className="text-sm text-muted-foreground">
-            New Staff?{" "}
-            <Link to="/register" className="font-medium text-primary transition-smooth hover:text-primary/80">
-              Sign Up
-            </Link>
-          </p>
-        )}
-        {!portalSettings?.selfRegistrationEnabled && (
-          <p className="text-sm leading-5 text-muted-foreground">
-            Need access? <span className="font-medium text-foreground/80">Contact your authorized supervisor.</span>
-          </p>
-        )}
+        <div className="h-5" aria-hidden="true" />
         <p className="mt-1 text-xs text-muted-foreground">
           {portalSettings?.authorizedAccessText || "Authorized access only"}
         </p>
