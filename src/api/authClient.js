@@ -40,9 +40,9 @@ export function clearStoredAuthUser() {
   sessionStorage.removeItem(AUTH_STORAGE_KEY);
 }
 
-export async function loginWithEmail(email, password, remember = false) {
-  const data = await request("/auth/login", { email, passwordHash: password, remember });
-  if (data.requiresPasswordChange) return data;
+export async function loginWithEmail(email, password, remember = false, mfaCode = "") {
+  const data = await request("/auth/login", { email, passwordHash: password, remember, mfaCode });
+  if (data.requiresPasswordChange || data.mfaRequired) return data;
   return storeAuthUser(data.user, remember);
 }
 
@@ -106,8 +106,7 @@ export async function resendVerification(email) {
 }
 
 export async function requestPasswordReset(email) {
-  const resetPageUrl = `${window.location.origin}/reset-password`;
-  return request("/auth/request-password-reset", { email, resetPageUrl });
+  return request("/auth/request-password-reset", { email });
 }
 
 export async function resetPassword(token, newPassword) {
@@ -115,6 +114,10 @@ export async function resetPassword(token, newPassword) {
     token,
     newPasswordHash: newPassword,
   });
+}
+
+export async function changePassword(currentPassword, newPassword) {
+  return request("/auth/change-password", { currentPassword, newPassword });
 }
 
 export async function logoutFromServer() {

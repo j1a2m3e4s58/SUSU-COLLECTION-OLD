@@ -27,6 +27,8 @@ export default function Login() {
   const [confirmNewPassword, setConfirmNewPassword] = useState("");
   const [showPassword, setShowPassword] = useState(false);
   const [rememberMe, setRememberMe] = useState(true);
+  const [mfaRequired, setMfaRequired] = useState(false);
+  const [mfaCode, setMfaCode] = useState("");
   const [loading, setLoading] = useState(false);
 
   const showError = (message) => {
@@ -51,11 +53,17 @@ export default function Login() {
     e.preventDefault();
     setLoading(true);
     try {
-      const result = await login(email, password, rememberMe);
+      const result = await login(email, password, rememberMe, mfaCode);
       if (result?.requiresPasswordChange) {
         setNewPassword("");
         setConfirmNewPassword("");
         setStaffSetupStep(true);
+        return;
+      }
+      if (result?.mfaRequired) {
+        setMfaRequired(true);
+        setMfaCode("");
+        showSuccess("Enter the six-digit code from your authenticator app.");
         return;
       }
       navigate("/", { replace: true });
@@ -250,10 +258,17 @@ export default function Login() {
           )}
         </div>
 
+        {mfaRequired && (
+          <div className="space-y-1">
+            <Label htmlFor="mfa-code" className="text-[9px] font-bold uppercase tracking-widest text-muted-foreground">Authenticator code</Label>
+            <Input id="mfa-code" inputMode="numeric" autoComplete="one-time-code" maxLength={6} value={mfaCode} onChange={(event) => setMfaCode(event.target.value.replace(/\D/g, ''))} className="h-9 glass-input text-center font-mono tracking-[0.35em]" required />
+          </div>
+        )}
+
         <Button
           type="submit"
           className="h-10 w-full glass-button text-sm font-bold uppercase tracking-[0.16em]"
-          disabled={loading || !email || !password}
+          disabled={loading || !email || !password || (mfaRequired && mfaCode.length !== 6)}
         >
           {loading ? (
             <>
@@ -319,7 +334,7 @@ export default function Login() {
         >
           {mode === "staff" ? "Agent username login" : "Back to staff email login"}
         </button>
-        {portalSettings?.emailEnabled && (
+        {portalSettings?.selfRegistrationEnabled && (
           <p className="text-sm text-muted-foreground">
             New Staff?{" "}
             <Link to="/register" className="font-medium text-primary transition-smooth hover:text-primary/80">

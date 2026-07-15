@@ -1,10 +1,10 @@
 import React, { useState, useEffect } from 'react';
-import { archiveStaff, createAgentAccount, getActiveStaff, getCollections, getPortalSettings, importCustomers, reopenDailyCollections, resetAgentPassword, updateStaff } from '@/api/portalClient';
+import { archiveStaff, createAgentAccount, getActiveStaff, getCollections, getDailyCloseStatus, getPortalSettings, importCustomers, reopenDailyCollections, resetAgentPassword, reviewDailyClose, updateStaff } from '@/api/portalClient';
 import ControlledSelect from '@/components/ui/controlled-select';
 import { useAuth } from '@/lib/AuthContext';
 import { useWorkDate } from '@/lib/WorkDateContext';
 import { exportHtmlPdf } from '@/lib/pdfExport';
-import { UserCog, Search, Building2, X, AlertCircle, Loader2, Archive, FileText, Download, Plus, Upload, KeyRound, LockKeyhole } from 'lucide-react';
+import { UserCog, Search, Building2, X, AlertCircle, Loader2, Archive, FileText, Download, Plus, Upload, KeyRound, LockKeyhole, CheckCircle2 } from 'lucide-react';
 
 const parseCsvTable = (text) => {
   const rows = [];
@@ -65,6 +65,7 @@ export default function AgentManagement() {
   const [resetUsername, setResetUsername] = useState('');
   const [resetPassword, setResetPassword] = useState('');
   const [reopeningAgentId, setReopeningAgentId] = useState('');
+  const [reviewingAgentId, setReviewingAgentId] = useState('');
   const [importBranch, setImportBranch] = useState('');
   const [importRows, setImportRows] = useState([]);
   const [importInvalidRows, setImportInvalidRows] = useState([]);
@@ -270,6 +271,32 @@ export default function AgentManagement() {
     }
   };
 
+  const handleReviewClose = async (agent) => {
+    if (selectedScope !== 'day') {
+      setError('Select a specific day before reviewing a close.');
+      return;
+    }
+    setReviewingAgentId(agent.id);
+    setError('');
+    try {
+      const result = await getDailyCloseStatus(selectedDate, agent.id);
+      if (!result.close) throw new Error('This agent has not closed the selected day.');
+      const variance = Number(result.close.variance || 0);
+      const note = window.prompt(
+        variance ? `Variance is GHS ${variance.toFixed(2)}. Enter the reconciliation note before approval:` : 'Optional supervisor close note:',
+        '',
+      );
+      if (note === null) return;
+      if (variance && !note.trim()) throw new Error('A reconciliation note is required when there is a cash variance.');
+      await reviewDailyClose(selectedDate, agent.id, 'approved', note.trim());
+      setSuccess(`Approved the ${selectedDate} daily close for ${agent.fullname || agent.full_name}.`);
+    } catch (err) {
+      setError(err.message || 'Could not review this daily close.');
+    } finally {
+      setReviewingAgentId('');
+    }
+  };
+
   const normalizeImportRow = (row, rowNumber) => {
     const find = (...keys) => {
       const entries = Object.entries(row || {});
@@ -438,6 +465,10 @@ export default function AgentManagement() {
                           className="inline-flex items-center gap-1 bg-emerald-500/10 text-emerald-600 text-xs font-medium px-3 py-1.5 rounded-lg hover:bg-emerald-500/20 transition-colors disabled:opacity-50">
                           <LockKeyhole className="w-3 h-3" /> {reopeningAgentId === a.id ? 'Reopening...' : 'Reopen Day'}
                         </button>
+                        <button onClick={() => handleReviewClose(a)} disabled={reviewingAgentId === a.id}
+                          className="inline-flex items-center gap-1 rounded-lg bg-purple-500/10 px-3 py-1.5 text-xs font-medium text-purple-600 hover:bg-purple-500/20 disabled:opacity-50">
+                          <CheckCircle2 className="h-3 w-3" /> {reviewingAgentId === a.id ? 'Reviewing...' : 'Approve Close'}
+                        </button>
                       </div>
                     </td>
                   </tr>
@@ -479,6 +510,10 @@ export default function AgentManagement() {
                     <button onClick={() => handleReopenDay(a)} disabled={reopeningAgentId === a.id}
                       className="rounded-lg bg-emerald-500/10 px-3 py-1.5 text-xs font-medium text-emerald-600 disabled:opacity-50">
                       {reopeningAgentId === a.id ? 'Reopening...' : 'Reopen Day'}
+                    </button>
+                    <button onClick={() => handleReviewClose(a)} disabled={reviewingAgentId === a.id}
+                      className="rounded-lg bg-purple-500/10 px-3 py-1.5 text-xs font-medium text-purple-600 disabled:opacity-50">
+                      {reviewingAgentId === a.id ? 'Reviewing...' : 'Approve Close'}
                     </button>
                   </div>
                 </div>

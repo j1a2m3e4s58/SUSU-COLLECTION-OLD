@@ -27,6 +27,12 @@ const escapeCell = (value) => String(value ?? '')
   .replace(/>/g, '&gt;')
   .replace(/"/g, '&quot;');
 
+const csvCell = (value) => {
+  let text = String(value ?? '');
+  if (/^[=+\-@\t\r]/.test(text)) text = `'${text}`;
+  return `"${text.replace(/"/g, '""')}"`;
+};
+
 const normalizeLetters = (value) => String(value || '').replace(/[^a-z]/gi, '').toLowerCase();
 
 const commonNameParts = [
@@ -123,7 +129,7 @@ export default function Reports() {
     if (!reportData.length) return;
     const headers = ['Reference', 'Customer', 'Account Number', 'Amount', 'Agent', 'Branch', 'Date', 'Time', 'Status', 'Review'];
     const rows = reportData.map(c => [c.transaction_reference, c.account_name, c.account_number, c.amount, c.agent_name, c.branch_name, c.transaction_date, c.transaction_time, c.status, c.supervisor_review_status]);
-    const csv = [headers, ...rows].map(r => r.map(v => `"${v ?? ''}"`).join(',')).join('\n');
+    const csv = [headers, ...rows].map(r => r.map(csvCell).join(',')).join('\n');
     const blob = new Blob([csv], { type: 'text/csv' });
     const a = document.createElement('a');
     a.href = URL.createObjectURL(blob);
@@ -174,7 +180,7 @@ export default function Reports() {
   const exportWord = () => {
     if (!reportData.length) return;
     const total = reportData.reduce((s, c) => s + (c.amount || 0), 0);
-    const html = `<h1>Susu Collection - ${reportTypes.find(r => r.id === selectedType)?.label}</h1><p>Date: ${new Date().toLocaleString()}</p><p>Total: GH₵${total.toLocaleString()} | Transactions: ${reportData.length}</p><table border="1"><tr><th>Ref</th><th>Customer</th><th>Account</th><th>Amount</th><th>Agent</th><th>Branch</th><th>Date</th><th>Status</th></tr>${reportData.map(c => `<tr><td>${c.transaction_reference}</td><td>${c.account_name}</td><td>${c.account_number}</td><td>GH₵${c.amount}</td><td>${c.agent_name}</td><td>${c.branch_name}</td><td>${c.transaction_date}</td><td>${c.status}</td></tr>`).join('')}</table><br><p>Agent Signature: _______________ &nbsp;&nbsp; Supervisor Signature: _______________</p>`;
+    const html = `<h1>Susu Collection - ${escapeCell(reportTypes.find(r => r.id === selectedType)?.label)}</h1><p>Date: ${escapeCell(new Date().toLocaleString())}</p><p>Total: GH₵${escapeCell(total.toLocaleString())} | Transactions: ${reportData.length}</p><table border="1"><tr><th>Ref</th><th>Customer</th><th>Account</th><th>Amount</th><th>Agent</th><th>Branch</th><th>Date</th><th>Status</th></tr>${reportData.map(c => `<tr><td>${escapeCell(c.transaction_reference)}</td><td>${escapeCell(c.account_name)}</td><td>${escapeCell(c.account_number)}</td><td>GH₵${escapeCell(c.amount)}</td><td>${escapeCell(c.agent_name)}</td><td>${escapeCell(c.branch_name)}</td><td>${escapeCell(c.transaction_date)}</td><td>${escapeCell(c.status)}</td></tr>`).join('')}</table><br><p>Agent Signature: _______________ &nbsp;&nbsp; Supervisor Signature: _______________</p>`;
     const blob = new Blob([html], { type: 'application/msword' });
     const a = document.createElement('a');
     a.href = URL.createObjectURL(blob);

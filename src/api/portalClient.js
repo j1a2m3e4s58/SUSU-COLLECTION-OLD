@@ -170,6 +170,11 @@ export async function getCustomers() {
   return data.customers || [];
 }
 
+export async function lookupCustomer(accountNumber) {
+  const data = await apiRequest(`/customers?accountNumber=${encodeURIComponent(accountNumber)}`);
+  return (data.customers || [])[0] || null;
+}
+
 export async function createCustomer(payload) {
   const data = await apiRequest("/customers", {
     method: "POST",
@@ -219,9 +224,12 @@ export async function getAuditLogs() {
   return data.logs || [];
 }
 
-export async function exportBackup() {
+export async function exportBackup(passphrase) {
   const response = await fetch(`${API_ROOT}/backup/export`, {
+    method: "POST",
     credentials: "include",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ passphrase }),
   });
   const data = await response.json().catch(() => ({}));
   if (!response.ok) {
@@ -233,10 +241,10 @@ export async function exportBackup() {
   };
 }
 
-export async function importBackup(payload) {
+export async function importBackup(backup, passphrase) {
   return apiRequest("/backup/import", {
     method: "POST",
-    body: payload,
+    body: { backup, passphrase },
   });
 }
 
@@ -269,10 +277,10 @@ export async function getDailyCloseStatus(date, agentId) {
   return data;
 }
 
-export async function closeDailyCollections(date) {
+export async function closeDailyCollections(date, cashCounted) {
   const data = await apiRequest("/daily-close", {
     method: "POST",
-    body: { date },
+    body: { date, cash_counted: cashCounted },
   });
   return data.close;
 }
@@ -282,6 +290,14 @@ export async function reopenDailyCollections(date, agentId) {
     method: "POST",
     body: { date, agentId },
   });
+}
+
+export async function reviewDailyClose(date, agentId, status, note = "") {
+  const data = await apiRequest("/daily-close/review", {
+    method: "POST",
+    body: { date, agentId, status, note },
+  });
+  return data.close;
 }
 
 export async function getNotifications() {

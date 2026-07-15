@@ -86,6 +86,47 @@ def write_document(path: str, payload) -> None:
             )
 
 
+def update_documents(documents: dict[str, object], mutator):
+    """Atomically lock, mutate and persist several document stores.
+
+    The callback receives a dictionary keyed by the original paths. PostgreSQL
+    row locks are acquired in a stable order before any payload is read, which
+    prevents stale read/modify/write operations from losing concurrent updates.
+    Local-file callers use the application-level equivalent.
+    """
+    if _engine is None:
+        return None
+    paths = sorted(documents, key=_key)
+    keys = [_key(path) for path in paths]
+    with _lock, _engine.begin() as connection:
+        rows = connection.execute(
+            select(_store.c.key, _store.c.payload)
+            .where(_store.c.key.in_(keys))
+            .order_by(_store.c.key)
+            .with_for_update()
+        ).all()
+        payload_by_key = {row.key: row.payload for row in rows}
+        current = {}
+        for path in paths:
+            key = _key(path)
+            try:
+                current[path] = json.loads(payload_by_key[key]) if key in payload_by_key else deepcopy(documents[path])
+            except (TypeError, ValueError):
+                current[path] = deepcopy(documents[path])
+        result = mutator(current)
+        now = int(time.time() * 1000)
+        for path in paths:
+            key = _key(path)
+            serialized = json.dumps(current[path], ensure_ascii=True, separators=(",", ":"))
+            if key in payload_by_key:
+                connection.execute(
+                    _store.update().where(_store.c.key == key).values(payload=serialized, updated_at=now)
+                )
+            else:
+                connection.execute(_store.insert().values(key=key, payload=serialized, updated_at=now))
+        return result
+
+
 def ensure_document(path: str, default) -> None:
     if _engine is None:
         return

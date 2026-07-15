@@ -70,9 +70,9 @@ export const AuthProvider = ({ children }) => {
     };
   }, [user?.id]);
 
-  const login = async (email, password, remember = false) => {
-    const result = await loginWithEmail(email, password, remember);
-    if (result?.requiresPasswordChange) return result;
+  const login = async (email, password, remember = false, mfaCode = "") => {
+    const result = await loginWithEmail(email, password, remember, mfaCode);
+    if (result?.requiresPasswordChange || result?.mfaRequired) return result;
     const authUser = normalizeUser(result);
     setUser(authUser);
     pingPresence(authUser.id).catch(() => {});

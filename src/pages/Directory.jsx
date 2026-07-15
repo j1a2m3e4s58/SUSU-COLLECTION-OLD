@@ -17,14 +17,13 @@ import {
   archiveStaff,
   createAgentAccount,
   createStaffUser,
-  deleteStaff,
   getActiveStaff,
   getPortalSettings,
   resolveAssetUrl,
   updateStaff,
 } from "@/api/portalClient";
 import { useAuth } from "@/lib/AuthContext";
-import { Archive, Building2, Loader2, Mail, MapPin, Phone, Search, ShieldCheck, Trash2, UserPlus, Users } from "lucide-react";
+import { Archive, Building2, Loader2, Mail, MapPin, Phone, Search, ShieldCheck, UserPlus, Users } from "lucide-react";
 
 function initials(name) {
   return String(name || "User")
@@ -161,7 +160,6 @@ export default function Directory() {
   const [success, setSuccess] = useState("");
   const [editTarget, setEditTarget] = useState(null);
   const [archivingId, setArchivingId] = useState("");
-  const [removingId, setRemovingId] = useState("");
   const [confirmAction, setConfirmAction] = useState(null);
   const [showAddAgent, setShowAddAgent] = useState(false);
   const [addingAgent, setAddingAgent] = useState(false);
@@ -273,22 +271,6 @@ export default function Directory() {
       setError(err.message || "Could not archive this user");
     } finally {
       setArchivingId("");
-      setConfirmAction(null);
-    }
-  };
-
-  const handleRemoveStaff = async (member) => {
-    setRemovingId(member.id);
-    setError("");
-    setSuccess("");
-    try {
-      await deleteStaff(member.id);
-      setStaff((current) => current.filter((item) => item.id !== member.id));
-      setSuccess(`${member.fullname} has been removed from the system.`);
-    } catch (err) {
-      setError(err.message || "Could not remove this user");
-    } finally {
-      setRemovingId("");
       setConfirmAction(null);
     }
   };
@@ -467,7 +449,6 @@ export default function Directory() {
                   const photo = resolveAssetUrl(member.imageFile);
                   const canEdit = canManageMember(member);
                   const canArchive = canOwnerControl && canEdit;
-                  const canRemove = canEdit;
                   return (
                     <div key={member.id} className="flex h-[198px] flex-col gap-2 overflow-hidden rounded-xl border border-border bg-card p-3 shadow-sm transition-transform hover:-translate-y-0.5 sm:h-[238px] sm:gap-3 sm:p-4">
                       <div className="flex items-start gap-3">
@@ -533,9 +514,7 @@ export default function Directory() {
                       </div>
 
                       {canEdit && (
-                        <div className={`grid h-8 shrink-0 gap-2 border-t border-border pt-1 sm:h-9 ${
-                          canArchive && canRemove ? "grid-cols-3" : canRemove ? "grid-cols-2" : "grid-cols-1"
-                        }`}>
+                        <div className={`grid h-8 shrink-0 gap-2 border-t border-border pt-1 sm:h-9 ${canArchive ? "grid-cols-2" : "grid-cols-1"}`}>
                           <Button
                             type="button"
                             variant="outline"
@@ -556,19 +535,6 @@ export default function Directory() {
                             >
                               <Archive className="mr-1 h-3.5 w-3.5" />
                               {archivingId === member.id ? "Archiving..." : "Archive"}
-                            </Button>
-                          )}
-                          {canRemove && (
-                            <Button
-                              type="button"
-                              variant="ghost"
-                              size="sm"
-                              className="h-7 text-xs text-destructive hover:bg-destructive/10 hover:text-destructive"
-                              disabled={removingId === member.id}
-                              onClick={() => setConfirmAction({ type: "remove", member })}
-                            >
-                              <Trash2 className="mr-1 h-3.5 w-3.5" />
-                              {removingId === member.id ? "Removing..." : "Remove"}
                             </Button>
                           )}
                         </div>
@@ -700,19 +666,14 @@ export default function Directory() {
         onOpenChange={(open) => {
           if (!open) setConfirmAction(null);
         }}
-        title={confirmAction?.type === "archive" ? "Archive staff member?" : "Remove staff member?"}
-        description={
-          confirmAction?.type === "archive"
-            ? `Archive ${confirmAction?.member?.fullname || "this staff member"} and move them out of the active directory.`
-            : `Permanently remove ${confirmAction?.member?.fullname || "this staff member"} from the system. Their login will be cleared so they can sign up again.`
-        }
-        confirmLabel={confirmAction?.type === "archive" ? "Archive" : "Remove"}
+        title="Archive staff member?"
+        description={`Archive ${confirmAction?.member?.fullname || "this staff member"} and move them out of the active directory while preserving financial accountability.`}
+        confirmLabel="Archive"
         destructive
-        busy={Boolean(archivingId || removingId)}
+        busy={Boolean(archivingId)}
         onConfirm={() => {
           if (!confirmAction?.member) return;
-          if (confirmAction.type === "archive") handleArchiveStaff(confirmAction.member);
-          else handleRemoveStaff(confirmAction.member);
+          handleArchiveStaff(confirmAction.member);
         }}
       />
     </div>

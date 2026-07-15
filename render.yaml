@@ -2,10 +2,10 @@ services:
   - type: web
     name: susu-collection-portal
     runtime: python
-    plan: free
+    plan: starter
     branch: main
     buildCommand: pip install -r mail-api/requirements.txt && npm ci && npm run build && rm -rf mail-api/public && cp -R dist mail-api/public
-    startCommand: cd mail-api && gunicorn app:app --bind 0.0.0.0:$PORT
+    startCommand: cd mail-api && gunicorn app:app --workers 2 --threads 4 --timeout 60 --bind 0.0.0.0:$PORT
     healthCheckPath: /api/health
     autoDeployTrigger: commit
     envVars:
@@ -14,7 +14,7 @@ services:
           name: susu-portal-db
           property: connectionString
       - key: PORTAL_DATA_DIR
-        value: /opt/render/project/src/mail-api/data
+        value: /var/data
       - key: VITE_MAIL_API_URL
         value: /api
       - key: PORTAL_PUBLIC_URL
@@ -25,9 +25,21 @@ services:
         sync: false
       - key: COOKIE_SECURE
         value: "true"
+      - key: SELF_REGISTRATION_ENABLED
+        value: "false"
+      - key: SESSION_IDLE_SECONDS
+        value: "1800"
+      - key: AUDIT_HMAC_KEY
+        sync: false
+      - key: MFA_SECRETS_JSON
+        sync: false
+    disk:
+      name: susu-portal-uploads
+      mountPath: /var/data
+      sizeGB: 10
 
 databases:
   - name: susu-portal-db
-    plan: free
+    plan: basic-256mb
     databaseName: susu_portal
     user: susu_portal

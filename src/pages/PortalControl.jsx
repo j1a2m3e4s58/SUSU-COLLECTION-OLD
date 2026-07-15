@@ -22,7 +22,6 @@ import {
   updatePortalSettings,
 } from "@/api/portalClient";
 import { useAuth } from "@/lib/AuthContext";
-import { decryptBackup, encryptBackup } from "@/lib/secureBackup";
 import { Building2, Download, ListPlus, Plus, RotateCcw, Save, Settings2, Trash2, Upload, X } from "lucide-react";
 
 const listControls = [
@@ -249,9 +248,8 @@ export default function PortalControl() {
     setSuccess("");
     try {
       if (backupPassphrase.length < 12) throw new Error("Enter a backup passphrase of at least 12 characters.");
-      const backup = await exportBackup();
-      const encrypted = await encryptBackup(backup.data, backupPassphrase);
-      const blob = new Blob([JSON.stringify(encrypted, null, 2)], { type: "application/json" });
+      const backup = await exportBackup(backupPassphrase);
+      const blob = new Blob([JSON.stringify(backup.data, null, 2)], { type: "application/json" });
       const link = document.createElement("a");
       link.href = URL.createObjectURL(blob);
       link.download = backup.filename.replace(/\.json$/i, ".susubackup.json");
@@ -277,8 +275,7 @@ export default function PortalControl() {
       if (backupPassphrase.length < 12) throw new Error("Enter the backup passphrase before importing.");
       const text = await file.text();
       const encrypted = JSON.parse(text);
-      const parsed = await decryptBackup(encrypted, backupPassphrase);
-      const response = await importBackup(parsed);
+      const response = await importBackup(encrypted, backupPassphrase);
       if (response.settings) {
         setSettings(response.settings);
         setDraft(response.settings);

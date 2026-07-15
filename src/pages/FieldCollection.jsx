@@ -1,5 +1,5 @@
-import React, { useState, useEffect } from 'react';
-import { closeDailyCollections, createCollection, getCollections, getCustomers, getDailyCloseStatus } from '@/api/portalClient';
+import React, { useState, useEffect, useRef } from 'react';
+import { closeDailyCollections, createCollection, getCollections, getCustomers, getDailyCloseStatus, lookupCustomer } from '@/api/portalClient';
 import { useAuth } from '@/lib/AuthContext';
 import { useAgentScope } from '@/lib/AgentScopeContext';
 import { useWorkDate } from '@/lib/WorkDateContext';
@@ -24,6 +24,8 @@ export default function FieldCollection() {
   const [now, setNow] = useState(new Date());
   const [dailyClose, setDailyClose] = useState(null);
   const [closingDay, setClosingDay] = useState(false);
+  const [cashCounted, setCashCounted] = useState('');
+  const depositKeyRef = useRef(null);
 
   useEffect(() => {
     const timer = setInterval(() => setNow(new Date()), 1000);
@@ -96,7 +98,8 @@ export default function FieldCollection() {
     setSelectedCustomer(null);
     setDuplicateWarning(null);
     try {
-      const all = (await getCustomers()).filter((customer) => {
+      const fetched = canRecordDeposit ? [await lookupCustomer(digits)].filter(Boolean) : await getCustomers();
+      const all = fetched.filter((customer) => {
         if (customer.customer_status !== 'active') return false;
         if (canUseAgentScope && !selectedAgent) return false;
         if (canUseAgentScope && selectedAgent && !matchesSelectedAgent(customer)) return false;
@@ -132,17 +135,18 @@ export default function FieldCollection() {
     if (!numAmount || numAmount <= 0) { setError('Please enter a valid positive amount'); return; }
     if (!confirmed) { setError('Please confirm the deposit was collected from the customer'); return; }
     if (selectedScope !== 'day') { setError('Select a specific day before recording a deposit.'); return; }
+    const today = new Date().toISOString().slice(0, 10);
+    if (selectedDate !== today) { setError('Deposits can only be recorded for today.'); return; }
 
     setSaving(true);
     setError('');
     const t = new Date();
     const dateStr = selectedDate;
     const timeStr = t.toLocaleTimeString('en', { hour12: false });
-    const ref = `SUS-${dateStr.replace(/-/g, '')}-${t.getTime().toString().slice(-6)}`;
-
     try {
+      depositKeyRef.current ||= crypto.randomUUID();
       const record = await createCollection({
-        transaction_reference: ref,
+        idempotency_key: depositKeyRef.current,
         customer_id: selectedCustomer.id,
         account_name: selectedCustomer.account_name,
         account_number: selectedCustomer.account_number,
@@ -164,6 +168,7 @@ export default function FieldCollection() {
       setAmount('');
       setConfirmed(false);
       setDuplicateWarning(null);
+      depositKeyRef.current = null;
     } catch (err) { setError(err.message || 'Failed to record deposit. Please try again.'); }
     setSaving(false);
   };
@@ -171,10 +176,11 @@ export default function FieldCollection() {
   const handleCloseDay = async () => {
     if (!canRecordDeposit) return;
     if (selectedScope !== 'day') { setError('Select a specific day before closing collections.'); return; }
+    if (cashCounted === '' || Number(cashCounted) < 0) { setError('Enter the physical cash counted before closing the day.'); return; }
     setClosingDay(true);
     setError('');
     try {
-      const close = await closeDailyCollections(selectedDate);
+      const close = await closeDailyCollections(selectedDate, cashCounted);
       setDailyClose(close);
     } catch (err) {
       setError(err.message || 'Could not close this collection day.');
@@ -198,22 +204,20 @@ export default function FieldCollection() {
         </p>
           </div>
           {canRecordDeposit && selectedScope === 'day' && (
-            <button
-              type="button"
-              onClick={handleCloseDay}
-              disabled={closingDay || Boolean(dailyClose)}
-              className="inline-flex items-center justify-center gap-2 rounded-lg border border-border bg-card px-4 py-2 text-sm font-medium text-foreground hover:bg-muted disabled:opacity-60"
-            >
-              <LockKeyhole className="h-4 w-4" />
-              {dailyClose ? 'Day Closed' : closingDay ? 'Closing...' : 'Close Day'}
-            </button>
+            <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
+              <input type="number" min="0" step="0.01" value={cashCounted} onChange={(event) => setCashCounted(event.target.value)} disabled={Boolean(dailyClose)} placeholder="Physical cash counted" className="rounded-lg border border-border bg-card px-3 py-2 text-sm text-foreground" />
+              <button type="button" onClick={handleCloseDay} disabled={closingDay || Boolean(dailyClose)} className="inline-flex items-center justify-center gap-2 rounded-lg border border-border bg-card px-4 py-2 text-sm font-medium text-foreground hover:bg-muted disabled:opacity-60">
+                <LockKeyhole className="h-4 w-4" />
+                {dailyClose ? 'Day Closed' : closingDay ? 'Closing...' : 'Close Day'}
+              </button>
+            </div>
           )}
         </div>
       </div>
 
       {dailyClose && (
         <div className="rounded-xl border border-emerald-500/30 bg-emerald-500/10 p-4 text-sm text-emerald-600">
-          Daily collections closed for {selectedLabel}: GHS {Number(dailyClose.totalAmount || 0).toLocaleString()} across {dailyClose.transactionCount || 0} transaction(s).
+          Daily collections closed for {selectedLabel}: expected GHS {Number(dailyClose.totalAmount || 0).toLocaleString()}, counted GHS {Number(dailyClose.cashCounted || 0).toLocaleString()}, variance GHS {Number(dailyClose.variance || 0).toLocaleString()} across {dailyClose.transactionCount || 0} transaction(s). Supervisor review: {dailyClose.reviewStatus || 'pending'}.
         </div>
       )}
 

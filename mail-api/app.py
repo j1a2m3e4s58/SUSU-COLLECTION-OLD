@@ -1,12 +1,17 @@
 from __future__ import annotations
 
 import json
+import base64
+import hashlib
+import hmac
 import os
 import secrets
 import shutil
 import smtplib
 import tempfile
+import threading
 import time
+import pyotp
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from email.message import EmailMessage
 from urllib.parse import urlencode, urlparse, urlunparse, parse_qsl
@@ -16,12 +21,16 @@ from flask import Flask, jsonify, redirect, request, send_from_directory
 from werkzeug.middleware.proxy_fix import ProxyFix
 from werkzeug.security import check_password_hash, generate_password_hash
 from werkzeug.utils import secure_filename
+from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 
 from storage_backend import (
     database_enabled,
     database_health,
     ensure_document,
     read_document,
+    update_documents,
     write_document,
 )
 
@@ -51,6 +60,7 @@ PORTAL_SETTINGS_STORE_PATH = os.path.join(DATA_DIR, "portal_settings_store.json"
 CUSTOMERS_STORE_PATH = os.path.join(DATA_DIR, "customers_store.json")
 COLLECTIONS_STORE_PATH = os.path.join(DATA_DIR, "collections_store.json")
 DAILY_CLOSES_STORE_PATH = os.path.join(DATA_DIR, "daily_closes_store.json")
+RATE_LIMIT_STORE_PATH = os.path.join(DATA_DIR, "rate_limit_store.json")
 UPLOADS_DIR = os.path.join(DATA_DIR, "uploads")
 PRESENCE_TTL_SECONDS = 20
 ONLINE_WINDOW_SECONDS = 20
@@ -61,6 +71,18 @@ SESSION_COOKIE_NAME = "susu_session"
 TRAINING_REMINDER_COOLDOWN_SECONDS = 24 * 60 * 60
 RATE_LIMIT_WINDOW_SECONDS = 15 * 60
 RATE_LIMIT_MAX_ATTEMPTS = 8
+SESSION_IDLE_SECONDS = int(os.getenv("SESSION_IDLE_SECONDS", "1800"))
+PROFILE_UPLOAD_LIMIT_BYTES = 5 * 1024 * 1024
+SELF_REGISTRATION_ENABLED = str(os.getenv("SELF_REGISTRATION_ENABLED", "")).lower() in {"1", "true", "yes"}
+AUDIT_HMAC_KEY = str(os.getenv("AUDIT_HMAC_KEY", "") or "").strip()
+
+
+def mfa_secret_for_email(email: str) -> str:
+    try:
+        mapping = json.loads(str(os.getenv("MFA_SECRETS_JSON", "{}") or "{}"))
+    except ValueError:
+        mapping = {}
+    return str(mapping.get(str(email or "").strip().lower(), "") or "").strip()
 DEFAULT_PORTAL_BRANCHES = [
     "HEAD OFFICE",
     "BAWJIASE",
@@ -172,136 +194,9 @@ OWNER_ADMIN_USER = {
     "isArchived": False,
 }
 
-INITIAL_USERS = [
-    {
-        "id": "db-user-6",
-        "fullname": "Desmond Tettey Quarshie",
-        "phone": "0243670230",
-        "email": "dquarshie@bawjiasecommunitybank.com",
-        "role": "GeneralStaff",
-        "position": "Staff",
-        "department": "SUSU AGENT",
-        "branch": "BAWJIASE",
-        "imageFile": None,
-        "isActive": True,
-        "isVerified": True,
-        "lastSeen": 1772637593885,
-        "registrationTime": 0,
-        "isArchived": False,
-    },
-    {
-        "id": "db-user-9",
-        "fullname": "Jane Afua Bruku",
-        "phone": "0248154869",
-        "email": "jbruku@bawjiasecommunitybank.com",
-        "role": "Supervisor",
-        "position": "Staff",
-        "department": "SUSU",
-        "branch": "HEAD OFFICE",
-        "imageFile": None,
-        "isActive": True,
-        "isVerified": True,
-        "lastSeen": 1770741882598,
-        "registrationTime": 0,
-        "isArchived": False,
-    },
-    {
-        "id": "db-user-5",
-        "fullname": "Kwabena Asare",
-        "phone": "0599779664",
-        "email": "kasare@bawjiasecommunitybank.com",
-        "role": "GeneralStaff",
-        "position": "Staff",
-        "department": "SUSU AGENT",
-        "branch": "HEAD OFFICE",
-        "imageFile": None,
-        "isActive": True,
-        "isVerified": True,
-        "lastSeen": 1770990814598,
-        "registrationTime": 0,
-        "isArchived": False,
-    },
-    {
-        "id": "db-user-8",
-        "fullname": "Kwesi Adu Snr Yeenu-Prah",
-        "phone": "0555443053",
-        "email": "kyeenu-prah@bawjiasecommunitybank.com",
-        "role": "GeneralStaff",
-        "position": "Staff",
-        "department": "SUSU AGENT",
-        "branch": "HEAD OFFICE",
-        "imageFile": "profile_pics/f658de3c2aa8ca6d.jpeg",
-        "isActive": True,
-        "isVerified": True,
-        "lastSeen": 1770296150530,
-        "registrationTime": 0,
-        "isArchived": False,
-    },
-    {
-        "id": "db-user-4",
-        "fullname": "Ato Asiedu Mensah",
-        "phone": "0247554428",
-        "email": "amensah@bawjiasecommunitybank.com",
-        "role": "Supervisor",
-        "position": "Staff",
-        "department": "SUSU",
-        "branch": "HEAD OFFICE",
-        "imageFile": None,
-        "isActive": True,
-        "isVerified": True,
-        "lastSeen": 1770975614364,
-        "registrationTime": 0,
-        "isArchived": False,
-    },
-    {
-        "id": "db-user-2",
-        "fullname": "James Lincoln Awuah",
-        "phone": "0536799490",
-        "email": "lawuah@bawjiasecommunitybank.com",
-        "role": "GeneralStaff",
-        "position": "Staff",
-        "department": "SUSU AGENT",
-        "branch": "HEAD OFFICE",
-        "imageFile": "profile_pics/88efb134d068db11.jpg",
-        "isActive": True,
-        "isVerified": True,
-        "lastSeen": 1775309044811,
-        "registrationTime": 0,
-        "isArchived": False,
-    },
-    {
-        "id": "db-user-3",
-        "fullname": "Nathaniel Oglie Narh",
-        "phone": "0246377830",
-        "email": "nnarh@bawjiasecommunitybank.com",
-        "role": "Supervisor",
-        "position": "Staff",
-        "department": "SUSU",
-        "branch": "HEAD OFFICE",
-        "imageFile": None,
-        "isActive": True,
-        "isVerified": True,
-        "lastSeen": 1769519876185,
-        "registrationTime": 0,
-        "isArchived": False,
-    },
-    {
-        "id": "db-user-7",
-        "fullname": "GABRIEL OWUSU",
-        "phone": "0246315586",
-        "email": "gowusu@bawjiasecommunitybank.com",
-        "role": "GeneralStaff",
-        "position": "Staff",
-        "department": "SUSU AGENT",
-        "branch": "HEAD OFFICE",
-        "imageFile": None,
-        "isActive": True,
-        "isVerified": True,
-        "lastSeen": 1769689048721,
-        "registrationTime": 0,
-        "isArchived": False,
-    },
-]
+# Staff are provisioned by the Owner/Supervisor workflow and stored in the
+# database. Personal records must never be embedded in source control.
+INITIAL_USERS: list[dict] = []
 app = Flask(__name__, static_folder=None)
 app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1)
 os.makedirs(DATA_DIR, exist_ok=True)
@@ -346,6 +241,7 @@ STORE_DEFAULTS: dict[str, object] = {
     CUSTOMERS_STORE_PATH: [],
     COLLECTIONS_STORE_PATH: [],
     DAILY_CLOSES_STORE_PATH: [],
+    RATE_LIMIT_STORE_PATH: {},
 }
 
 
@@ -941,6 +837,24 @@ def read_json_file(path: str, default):
         return default
 
 
+_LOCAL_STORE_TRANSACTION_LOCK = threading.RLock()
+
+
+def mutate_store_documents(documents: dict[str, object], mutator):
+    """Run a read/modify/write operation without exposing stale documents."""
+    if database_enabled():
+        return update_documents(documents, mutator)
+    with _LOCAL_STORE_TRANSACTION_LOCK:
+        current = {
+            path: read_json_file(path, default)
+            for path, default in documents.items()
+        }
+        result = mutator(current)
+        for path, payload in current.items():
+            atomic_write_json(path, payload)
+        return result
+
+
 def normalize_user(raw: dict) -> dict:
     raw_email = str(raw.get("email", "")).strip().lower()
     login_username = str(raw.get("loginUsername", "") or raw.get("username", "")).strip().lower()
@@ -1113,6 +1027,19 @@ def serialize_users_with_presence(users: list[dict]) -> list[dict]:
     presence = prune_presence(load_presence_store())
     save_presence_store(presence)
     return [serialize_user_with_presence(user, presence) for user in users]
+
+
+def directory_user_view(viewer: dict, user: dict, presence: dict[str, int] | None = None) -> dict:
+    serialized = serialize_user_with_presence(user, presence)
+    if is_owner_admin(viewer) or str(viewer.get("id")) == str(user.get("id")):
+        return serialized
+    return {
+        key: serialized.get(key)
+        for key in (
+            "id", "fullname", "position", "department", "branch", "imageFile",
+            "role", "isActive", "isArchived", "lastSeen", "isOnlineNow",
+        )
+    }
 
 
 def load_password_store() -> dict[str, str]:
@@ -1352,8 +1279,44 @@ def public_portal_settings() -> dict:
     settings = load_portal_settings_store()
     settings.pop("updatedBy", None)
     settings["emailEnabled"] = email_delivery_configured()
+    settings["selfRegistrationEnabled"] = SELF_REGISTRATION_ENABLED and email_delivery_configured()
     settings["persistentStorage"] = database_enabled()
     return settings
+
+
+def production_readiness_blockers() -> list[str]:
+    public_url = urlparse(str(os.getenv("PORTAL_PUBLIC_URL", "") or ""))
+    blockers = []
+    if not database_enabled():
+        blockers.append("PostgreSQL persistent storage")
+    if len(AUDIT_HMAC_KEY) < 32:
+        blockers.append("AUDIT_HMAC_KEY with at least 32 characters")
+    if not verify_audit_chain(load_audit_logs_store()):
+        blockers.append("an intact audit-log hash chain")
+    if public_url.scheme != "https" or not public_url.netloc:
+        blockers.append("a valid HTTPS PORTAL_PUBLIC_URL")
+    privileged_without_mfa = [
+        user.get("email") for user in load_user_store()
+        if user.get("isActive") and user.get("role") in {"OwnerAdmin", "Supervisor"}
+        and not mfa_secret_for_email(user.get("email", ""))
+    ]
+    if privileged_without_mfa:
+        blockers.append("MFA_SECRETS_JSON entries for every active Owner/Supervisor")
+    return blockers
+
+
+@app.before_request
+def block_unready_live_financial_mutations():
+    if request.method not in {"POST", "PUT", "PATCH", "DELETE"}:
+        return None
+    if not request.path.startswith(("/api/customers", "/api/collections", "/api/daily-close")):
+        return None
+    if str(load_portal_settings_store().get("appMode", "test")).lower() != "live":
+        return None
+    blockers = production_readiness_blockers()
+    if blockers:
+        return jsonify({"error": f"Live financial writes are blocked until these controls are configured: {', '.join(blockers)}."}), 503
+    return None
 
 
 def save_portal_settings_store(settings: dict) -> None:
@@ -1371,9 +1334,8 @@ def next_content_id(items: list[dict], floor: int = 1000) -> int:
 
 
 def request_ip_address() -> str:
-    forwarded_for = request.headers.get("X-Forwarded-For", "")
-    if forwarded_for:
-        return forwarded_for.split(",")[0].strip() or "unknown"
+    # ProxyFix has already replaced remote_addr from exactly one trusted proxy.
+    # Reading X-Forwarded-For again would allow clients to choose the rate-limit key.
     return str(request.remote_addr or "unknown")
 
 
@@ -1383,20 +1345,26 @@ def rate_limit_key(scope: str, identifier: object) -> str:
 
 def auth_rate_limited(key: str) -> bool:
     cutoff = now_seconds() - RATE_LIMIT_WINDOW_SECONDS
-    attempts = [stamp for stamp in FAILED_AUTH_ATTEMPTS.get(key, []) if stamp >= cutoff]
-    FAILED_AUTH_ATTEMPTS[key] = attempts
+    store = read_json_file(RATE_LIMIT_STORE_PATH, {})
+    attempts = [int(stamp) for stamp in store.get(key, []) if int(stamp) >= cutoff]
     return len(attempts) >= RATE_LIMIT_MAX_ATTEMPTS
 
 
 def record_auth_failure(key: str) -> None:
     cutoff = now_seconds() - RATE_LIMIT_WINDOW_SECONDS
-    attempts = [stamp for stamp in FAILED_AUTH_ATTEMPTS.get(key, []) if stamp >= cutoff]
-    attempts.append(now_seconds())
-    FAILED_AUTH_ATTEMPTS[key] = attempts[-RATE_LIMIT_MAX_ATTEMPTS:]
+    def mutate(documents):
+        store = documents[RATE_LIMIT_STORE_PATH]
+        attempts = [int(stamp) for stamp in store.get(key, []) if int(stamp) >= cutoff]
+        attempts.append(now_seconds())
+        store[key] = attempts[-RATE_LIMIT_MAX_ATTEMPTS:]
+    mutate_store_documents({RATE_LIMIT_STORE_PATH: {}}, mutate)
 
 
 def clear_auth_failures(key: str) -> None:
     FAILED_AUTH_ATTEMPTS.pop(key, None)
+    def mutate(documents):
+        documents[RATE_LIMIT_STORE_PATH].pop(key, None)
+    mutate_store_documents({RATE_LIMIT_STORE_PATH: {}}, mutate)
 
 
 def compact_audit_target(target: object) -> str:
@@ -1435,7 +1403,11 @@ def compact_audit_target(target: object) -> str:
             if before.get(key) != after.get(key) and key not in {"lastSeen", "updatedAt"}
         ]
         if changed:
-            parts.append(f"changed: {', '.join(changed[:8])}")
+            changes = {
+                key: {"before": before.get(key), "after": after.get(key)}
+                for key in changed
+            }
+            parts.append(f"changes: {json.dumps(changes, ensure_ascii=True, sort_keys=True)}")
     return "; ".join(parts) or json.dumps(target, ensure_ascii=True, sort_keys=True)
 
 
@@ -1453,6 +1425,8 @@ def load_audit_logs_store() -> list[dict]:
                     "target": str(item.get("target", "")).strip(),
                     "ipAddress": str(item.get("ipAddress", "") or "unknown"),
                     "timestamp": int(item.get("timestamp", 0) or 0),
+                    "previousHash": str(item.get("previousHash", "") or ""),
+                    "auditHash": str(item.get("auditHash", "") or ""),
                 }
             )
         except Exception:
@@ -1465,7 +1439,45 @@ def load_audit_logs_store() -> list[dict]:
 
 
 def save_audit_logs_store(items: list[dict]) -> None:
-    save_json_list_store(AUDIT_LOGS_STORE_PATH, items[:1000])
+    save_json_list_store(AUDIT_LOGS_STORE_PATH, items)
+
+
+def audit_entry_hash(entry: dict) -> str:
+    material = json.dumps(
+        {key: entry.get(key) for key in ("id", "actorId", "actorName", "action", "target", "ipAddress", "timestamp", "previousHash")},
+        ensure_ascii=True,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    key = (AUDIT_HMAC_KEY or "development-only-audit-key").encode("utf-8")
+    return hmac.new(key, material, hashlib.sha256).hexdigest()
+
+
+def verify_audit_chain(logs: list[dict]) -> bool:
+    for index, entry in enumerate(logs):
+        if not entry.get("auditHash"):
+            continue
+        if not hmac.compare_digest(str(entry.get("auditHash")), audit_entry_hash(entry)):
+            return False
+        older_hash = str(logs[index + 1].get("auditHash", "")) if index + 1 < len(logs) else ""
+        if str(entry.get("previousHash", "")) != older_hash:
+            return False
+    return True
+
+
+def make_audit_entry(logs: list[dict], actor: dict | None, action: str, target: object, ip_address: str | None = None) -> dict:
+    entry = {
+        "id": next_content_id(logs, floor=1),
+        "actorId": str(actor.get("id", "system") if actor else "system"),
+        "actorName": str(actor.get("fullname", "System") if actor else "System"),
+        "action": str(action or "").strip().upper(),
+        "target": str(compact_audit_target(target) or "").strip(),
+        "ipAddress": ip_address or request_ip_address(),
+        "timestamp": now_ms(),
+        "previousHash": str(logs[0].get("auditHash", "") if logs else ""),
+    }
+    entry["auditHash"] = audit_entry_hash(entry)
+    return entry
 
 
 def record_audit_log(
@@ -1474,20 +1486,13 @@ def record_audit_log(
     target: object,
     ip_address: str | None = None,
 ) -> dict:
-    logs = load_audit_logs_store()
-    target_text = compact_audit_target(target)
-    entry = {
-        "id": next_content_id(logs, floor=1),
-        "actorId": str(actor.get("id", "system") if actor else "system"),
-        "actorName": str(actor.get("fullname", "System") if actor else "System"),
-        "action": str(action or "").strip().upper(),
-        "target": str(target_text or "").strip(),
-        "ipAddress": ip_address or request_ip_address(),
-        "timestamp": now_ms(),
-    }
-    logs.insert(0, entry)
-    save_audit_logs_store(logs)
-    return entry
+    def mutate(documents):
+        logs = documents[AUDIT_LOGS_STORE_PATH]
+        entry = make_audit_entry(logs, actor, action, target, ip_address)
+        logs.insert(0, entry)
+        return entry
+
+    return mutate_store_documents({AUDIT_LOGS_STORE_PATH: []}, mutate)
 
 
 def record_content_audit(actor: dict, action: str, module: str, item: dict | None) -> None:
@@ -1606,6 +1611,7 @@ def load_sessions() -> dict[str, dict]:
         sessions[token] = {
             "userId": user_id,
             "expiresAt": expires_at,
+            "lastSeenAt": int(item.get("lastSeenAt", 0) or 0),
         }
     return sessions
 
@@ -1614,12 +1620,21 @@ def save_sessions(store: dict[str, dict]) -> None:
     atomic_write_json(SESSIONS_STORE_PATH, store)
 
 
+def session_token_key(token: str) -> str:
+    return hashlib.sha256(str(token or "").encode("utf-8")).hexdigest()
+
+
+def one_time_token_key(token: str) -> str:
+    return hashlib.sha256(str(token or "").encode("utf-8")).hexdigest()
+
+
 def issue_session(user_id: str) -> str:
     sessions = load_sessions()
     token = secrets.token_urlsafe(32)
-    sessions[token] = {
+    sessions[session_token_key(token)] = {
         "userId": user_id,
         "expiresAt": now_seconds() + int(load_portal_settings_store()["sessionDays"]) * 24 * 60 * 60,
+        "lastSeenAt": now_seconds(),
     }
     save_sessions(sessions)
     return token
@@ -1648,8 +1663,9 @@ def clear_session_cookie(response):
 
 def revoke_session(token: str) -> None:
     sessions = load_sessions()
-    if token in sessions:
-        sessions.pop(token, None)
+    key = session_token_key(token)
+    if key in sessions:
+        sessions.pop(key, None)
         save_sessions(sessions)
 
 
@@ -1668,17 +1684,26 @@ def require_authenticated_user():
     if not token:
         return None, None, (jsonify({"error": "Authentication required"}), 401)
     sessions = load_sessions()
-    session = sessions.get(token)
+    key = session_token_key(token)
+    session = sessions.get(key)
     if not session:
         return None, None, (jsonify({"error": "Invalid or expired session"}), 401)
     if int(session.get("expiresAt", 0) or 0) <= now_seconds():
         revoke_session(token)
         return None, None, (jsonify({"error": "Invalid or expired session"}), 401)
+    last_seen_at = int(session.get("lastSeenAt", 0) or 0)
+    if not last_seen_at or last_seen_at + SESSION_IDLE_SECONDS <= now_seconds():
+        revoke_session(token)
+        return None, None, (jsonify({"error": "Session expired due to inactivity"}), 401)
     users = load_user_store()
     user = find_user_by_id(users, session["userId"])
     if not user or user["isArchived"] or not user["isActive"] or not user["isVerified"]:
         revoke_session(token)
         return None, None, (jsonify({"error": "Invalid or expired session"}), 401)
+    if now_seconds() - last_seen_at >= 60:
+        session["lastSeenAt"] = now_seconds()
+        sessions[key] = session
+        save_sessions(sessions)
     return token, user, None
 
 
@@ -1716,9 +1741,11 @@ def generate_verification_code() -> str:
 
 
 def build_reset_url(base_url: str, token: str) -> str:
+    trusted_origin = str(os.getenv("PORTAL_PUBLIC_URL", "") or "").strip().rstrip("/")
+    base_url = f"{trusted_origin}/reset-password" if trusted_origin else ""
     parsed = urlparse(base_url)
-    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
-        raise ValueError("A valid reset page URL is required")
+    if parsed.scheme != "https" or not parsed.netloc or parsed.username or parsed.password:
+        raise ValueError("PORTAL_PUBLIC_URL must be configured as a trusted HTTPS origin")
     query = dict(parse_qsl(parsed.query, keep_blank_values=True))
     query["token"] = token
     return urlunparse(parsed._replace(query=urlencode(query)))
@@ -2474,7 +2501,7 @@ def upload_public_url(filename: str) -> str:
     return f"/uploads/{filename}"
 
 
-def save_uploaded_media(file_storage, kind: str) -> dict:
+def save_uploaded_media(file_storage, kind: str, owner_id: str = "") -> dict:
     if not file_storage or not getattr(file_storage, "filename", ""):
         raise ValueError("A file is required")
     original_name = secure_filename(str(file_storage.filename))
@@ -2504,7 +2531,27 @@ def save_uploaded_media(file_storage, kind: str) -> dict:
         allowed = {".pdf", ".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx"}
     if ext not in allowed:
         raise ValueError("Unsupported file type")
-    filename = f"{kind}-{secrets.token_hex(8)}{ext}"
+    if kind == "profile":
+        file_storage.stream.seek(0, os.SEEK_END)
+        size = file_storage.stream.tell()
+        file_storage.stream.seek(0)
+        if size > PROFILE_UPLOAD_LIMIT_BYTES:
+            raise ValueError("Profile photos must be 5 MB or smaller")
+        header = file_storage.stream.read(16)
+        file_storage.stream.seek(0)
+        signatures = {
+            ".jpg": (b"\xff\xd8\xff",),
+            ".jpeg": (b"\xff\xd8\xff",),
+            ".png": (b"\x89PNG\r\n\x1a\n",),
+            ".gif": (b"GIF87a", b"GIF89a"),
+            ".webp": (b"RIFF",),
+        }
+        if not any(header.startswith(signature) for signature in signatures.get(ext, ())):
+            raise ValueError("The uploaded image content does not match its file type")
+        if ext == ".webp" and header[8:12] != b"WEBP":
+            raise ValueError("Invalid WebP image")
+    owner_prefix = f"-{secure_filename(owner_id)}" if kind == "profile" and owner_id else ""
+    filename = f"{kind}{owner_prefix}-{secrets.token_hex(8)}{ext}"
     target_path = os.path.join(UPLOADS_DIR, filename)
     file_storage.save(target_path)
     return {
@@ -2518,10 +2565,13 @@ def save_uploaded_media(file_storage, kind: str) -> dict:
 def health():
     try:
         database_health()
-        return jsonify({
-            "ok": True,
+        audit_integrity = verify_audit_chain(load_audit_logs_store())
+        response = jsonify({
+            "ok": audit_integrity,
             "storage": "postgresql" if database_enabled() else "local-json",
+            "auditIntegrity": audit_integrity,
         })
+        return response if audit_integrity else (response, 503)
     except Exception:
         app.logger.exception("Database health check failed")
         return jsonify({"ok": False, "storage": "unavailable"}), 503
@@ -2563,11 +2613,17 @@ def legacy_mail_api(path: str):
 
 @app.route("/api/presence", methods=["GET"])
 def get_presence():
-    _, _, error = require_authenticated_user()
+    _, auth_user, error = require_authenticated_user()
     if error:
         return error
     store = prune_presence(load_presence_store())
     save_presence_store(store)
+    if not is_owner_admin(auth_user) and auth_user.get("role") != "Supervisor":
+        store = {auth_user["id"]: store[auth_user["id"]]} if auth_user["id"] in store else {}
+    else:
+        users = load_user_store()
+        allowed = {user["id"] for user in users if can_view_staff_record(auth_user, user)}
+        store = {user_id: stamp for user_id, stamp in store.items() if user_id in allowed}
     return jsonify({"presence": store})
 
 
@@ -2769,6 +2825,11 @@ def update_portal_settings():
     data, error = require_json()
     if error:
         return error
+    requested_mode = "live" if str(data.get("appMode", "test")).strip().lower() == "live" else "test"
+    if requested_mode == "live":
+        blockers = production_readiness_blockers()
+        if blockers:
+            return jsonify({"error": f"Live Mode is blocked until these controls are configured: {', '.join(blockers)}."}), 400
     branches = normalize_portal_branches(data.get("branches"))
     settings = {
         "bankName": str(data.get("bankName") or DEFAULT_PORTAL_SETTINGS["bankName"]).strip(),
@@ -2795,7 +2856,7 @@ def update_portal_settings():
         "trainingLabel": str(data.get("trainingLabel") or DEFAULT_PORTAL_SETTINGS["trainingLabel"]),
         "formsLabel": str(data.get("formsLabel") or DEFAULT_PORTAL_SETTINGS["formsLabel"]),
         "supportLabel": str(data.get("supportLabel") or DEFAULT_PORTAL_SETTINGS["supportLabel"]),
-        "appMode": "live" if str(data.get("appMode", "test")).strip().lower() == "live" else "test",
+        "appMode": requested_mode,
         "profileLabel": str(data.get("profileLabel") or DEFAULT_PORTAL_SETTINGS["profileLabel"]),
         "activeStaffLabel": str(data.get("activeStaffLabel") or DEFAULT_PORTAL_SETTINGS["activeStaffLabel"]),
         "branchCoverageLabel": str(data.get("branchCoverageLabel") or DEFAULT_PORTAL_SETTINGS["branchCoverageLabel"]),
@@ -2829,11 +2890,54 @@ def update_portal_settings():
     return jsonify({"ok": True, "settings": public_portal_settings()})
 
 
-@app.route("/api/backup/export", methods=["GET"])
+def encrypt_backup_payload(payload: dict, passphrase: str) -> dict:
+    if len(passphrase) < 12:
+        raise ValueError("Backup passphrase must be at least 12 characters.")
+    salt = secrets.token_bytes(16)
+    iv = secrets.token_bytes(12)
+    key = PBKDF2HMAC(algorithm=hashes.SHA256(), length=32, salt=salt, iterations=310000).derive(passphrase.encode("utf-8"))
+    ciphertext = AESGCM(key).encrypt(iv, json.dumps(payload, separators=(",", ":")).encode("utf-8"), None)
+    return {
+        "format": "susu-encrypted-backup",
+        "version": 1,
+        "algorithm": "AES-256-GCM",
+        "kdf": "PBKDF2-SHA256-310000",
+        "salt": base64.b64encode(salt).decode("ascii"),
+        "iv": base64.b64encode(iv).decode("ascii"),
+        "ciphertext": base64.b64encode(ciphertext).decode("ascii"),
+    }
+
+
+def decrypt_backup_payload(wrapper: dict, passphrase: str) -> dict:
+    if wrapper.get("format") != "susu-encrypted-backup" or wrapper.get("version") != 1:
+        raise ValueError("Unsupported encrypted backup format.")
+    if len(passphrase) < 12:
+        raise ValueError("Backup passphrase must be at least 12 characters.")
+    try:
+        salt = base64.b64decode(wrapper["salt"], validate=True)
+        iv = base64.b64decode(wrapper["iv"], validate=True)
+        ciphertext = base64.b64decode(wrapper["ciphertext"], validate=True)
+        key = PBKDF2HMAC(algorithm=hashes.SHA256(), length=32, salt=salt, iterations=310000).derive(passphrase.encode("utf-8"))
+        payload = json.loads(AESGCM(key).decrypt(iv, ciphertext, None).decode("utf-8"))
+    except Exception as exc:
+        raise ValueError("Backup passphrase is incorrect or the backup is damaged.") from exc
+    if not isinstance(payload, dict):
+        raise ValueError("Backup payload is invalid.")
+    return payload
+
+
+@app.route("/api/backup/export", methods=["POST", "OPTIONS"])
 def export_production_backup():
+    preflight = handle_options()
+    if preflight:
+        return preflight
     _, auth_user, error = require_owner_admin()
     if error:
         return error
+    data, error = require_json()
+    if error:
+        return error
+    passphrase = str(data.get("passphrase") or "")
     backup = {
         "metadata": {
             "app": "bawjiase-staff-portal",
@@ -2865,7 +2969,11 @@ def export_production_backup():
             "dailyCloses": load_json_list_store(DAILY_CLOSES_STORE_PATH),
         },
     }
-    response = jsonify(backup)
+    try:
+        encrypted = encrypt_backup_payload(backup, passphrase)
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+    response = jsonify(encrypted)
     stamp = time.strftime("%Y%m%d-%H%M%S", time.gmtime())
     response.headers["Content-Disposition"] = (
         f'attachment; filename="bawjiase-portal-backup-{stamp}.json"'
@@ -2893,58 +3001,72 @@ def import_production_backup():
     data, error = require_json()
     if error:
         return error
-    stores = data.get("stores") if isinstance(data.get("stores"), dict) else None
+    try:
+        decrypted = decrypt_backup_payload(
+            data.get("backup") if isinstance(data.get("backup"), dict) else {},
+            str(data.get("passphrase") or ""),
+        )
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+    stores = decrypted.get("stores") if isinstance(decrypted.get("stores"), dict) else None
     if not stores:
         return jsonify({"error": "Backup file is missing stores data."}), 400
 
-    current_backup = {
-        "users": load_user_store(),
-        "passwords": load_password_store(),
-        "notifications": load_json_list_store(NOTIFICATIONS_STORE_PATH),
-        "auditLogs": load_audit_logs_store(),
-        "portalSettings": load_portal_settings_store(),
-        "customers": load_json_list_store(CUSTOMERS_STORE_PATH),
-        "collections": load_json_list_store(COLLECTIONS_STORE_PATH),
-        "dailyCloses": load_json_list_store(DAILY_CLOSES_STORE_PATH),
-    }
-
     try:
-        if "users" in stores:
-            save_user_store([normalize_user(item) for item in stores.get("users", []) if isinstance(item, dict)])
-        if "passwords" in stores and isinstance(stores.get("passwords"), dict):
-            save_password_store({
+        imported_users = [normalize_user(item) for item in stores.get("users", []) if isinstance(item, dict)]
+        imported_passwords = {
                 str(key): str(value)
                 for key, value in stores.get("passwords", {}).items()
                 if str(key).strip() and is_secure_password_hash(str(value))
-            })
-        if "notifications" in stores:
-            save_json_list_store(NOTIFICATIONS_STORE_PATH, stores.get("notifications") or [])
-        if "auditLogs" in stores:
-            save_audit_logs_store(stores.get("auditLogs") or [])
-        if "portalSettings" in stores and isinstance(stores.get("portalSettings"), dict):
-            imported_settings = {**DEFAULT_PORTAL_SETTINGS, **stores.get("portalSettings")}
-            imported_settings["departments"] = DEFAULT_PORTAL_DEPARTMENTS
-            save_portal_settings_store(imported_settings)
-        if "customers" in stores:
-            save_json_list_store(CUSTOMERS_STORE_PATH, stores.get("customers") or [])
-        if "collections" in stores:
-            save_json_list_store(COLLECTIONS_STORE_PATH, stores.get("collections") or [])
-        if "dailyCloses" in stores:
-            save_json_list_store(DAILY_CLOSES_STORE_PATH, stores.get("dailyCloses") or [])
+        }
+        imported_customers = [dict(item) for item in stores.get("customers", []) if isinstance(item, dict)]
+        imported_collections = [dict(item) for item in stores.get("collections", []) if isinstance(item, dict)]
+        imported_closes = [dict(item) for item in stores.get("dailyCloses", []) if isinstance(item, dict)]
+        imported_notifications = [dict(item) for item in stores.get("notifications", []) if isinstance(item, dict)]
+        imported_settings = {**DEFAULT_PORTAL_SETTINGS, **(stores.get("portalSettings") or {})}
+        imported_settings["departments"] = DEFAULT_PORTAL_DEPARTMENTS
+        imported_settings["appMode"] = "test"
+        customer_ids = [str(item.get("id") or "") for item in imported_customers]
+        account_numbers = [str(item.get("account_number") or "") for item in imported_customers]
+        references = [str(item.get("transaction_reference") or "") for item in imported_collections]
+        if len(customer_ids) != len(set(customer_ids)) or "" in customer_ids:
+            raise ValueError("Backup contains duplicate or missing customer IDs.")
+        if len(account_numbers) != len(set(account_numbers)) or "" in account_numbers:
+            raise ValueError("Backup contains duplicate or missing account numbers.")
+        if len(references) != len(set(references)) or "" in references:
+            raise ValueError("Backup contains duplicate or missing transaction references.")
+        known_customers = set(customer_ids)
+        for collection in imported_collections:
+            if str(collection.get("customer_id") or "") not in known_customers:
+                raise ValueError("Backup contains a transaction for an unknown customer.")
+            record_amount_pesewas(collection)
+        for customer in imported_customers:
+            recalculate_customer_balance(customer, imported_collections)
+
+        def mutate(documents):
+            documents[USERS_STORE_PATH] = imported_users
+            documents[PASSWORD_STORE_PATH] = imported_passwords
+            documents[NOTIFICATIONS_STORE_PATH] = imported_notifications
+            documents[PORTAL_SETTINGS_STORE_PATH] = imported_settings
+            documents[CUSTOMERS_STORE_PATH] = imported_customers
+            documents[COLLECTIONS_STORE_PATH] = imported_collections
+            documents[DAILY_CLOSES_STORE_PATH] = imported_closes
+            logs = documents[AUDIT_LOGS_STORE_PATH]
+            logs.insert(0, make_audit_entry(logs, auth_user, "IMPORT_BACKUP", {"stores": list(stores.keys())}))
+
+        mutate_store_documents(
+            {
+                USERS_STORE_PATH: [], PASSWORD_STORE_PATH: {}, NOTIFICATIONS_STORE_PATH: [],
+                PORTAL_SETTINGS_STORE_PATH: {}, CUSTOMERS_STORE_PATH: [], COLLECTIONS_STORE_PATH: [],
+                DAILY_CLOSES_STORE_PATH: [], AUDIT_LOGS_STORE_PATH: [],
+            },
+            mutate,
+        )
     except Exception as exc:
-        save_user_store(current_backup["users"])
-        save_password_store(current_backup["passwords"])
-        save_json_list_store(NOTIFICATIONS_STORE_PATH, current_backup["notifications"])
-        save_audit_logs_store(current_backup["auditLogs"])
-        save_portal_settings_store(current_backup["portalSettings"])
-        save_json_list_store(CUSTOMERS_STORE_PATH, current_backup["customers"])
-        save_json_list_store(COLLECTIONS_STORE_PATH, current_backup["collections"])
-        save_json_list_store(DAILY_CLOSES_STORE_PATH, current_backup["dailyCloses"])
-        return jsonify({"error": f"Backup import failed and current data was restored: {exc}"}), 400
+        return jsonify({"error": f"Backup import rejected without changing current data: {exc}"}), 400
 
     save_sessions({})
     save_presence_store({})
-    record_audit_log(auth_user, "IMPORT_BACKUP", {"stores": list(stores.keys())})
     return jsonify({"ok": True, "settings": public_portal_settings(), "reauthenticationRequired": True})
 
 
@@ -2964,12 +3086,16 @@ def clear_test_data():
     settings = load_portal_settings_store()
     if str(settings.get("appMode", "test")).lower() != "test":
         return jsonify({"error": "Switch the portal to Test Mode before clearing test data."}), 400
-    save_json_list_store(CUSTOMERS_STORE_PATH, [])
-    save_json_list_store(COLLECTIONS_STORE_PATH, [])
-    save_json_list_store(NOTIFICATIONS_STORE_PATH, [])
-    save_json_list_store(DAILY_CLOSES_STORE_PATH, [])
-    save_audit_logs_store([])
-    record_audit_log(auth_user, "CLEAR_TEST_DATA", {"cleared": ["customers", "collections", "notifications", "dailyCloses", "auditLogs"]})
+    def mutate(documents):
+        documents[CUSTOMERS_STORE_PATH] = [item for item in documents[CUSTOMERS_STORE_PATH] if str(item.get("environment", "test")).lower() != "test"]
+        documents[COLLECTIONS_STORE_PATH] = [item for item in documents[COLLECTIONS_STORE_PATH] if str(item.get("environment", "test")).lower() != "test"]
+        documents[DAILY_CLOSES_STORE_PATH] = [item for item in documents[DAILY_CLOSES_STORE_PATH] if str(item.get("environment", "test")).lower() != "test"]
+        logs = documents[AUDIT_LOGS_STORE_PATH]
+        logs.insert(0, make_audit_entry(logs, auth_user, "CLEAR_TEST_DATA", {"cleared": ["testCustomers", "testCollections", "testDailyCloses"]}))
+    mutate_store_documents(
+        {CUSTOMERS_STORE_PATH: [], COLLECTIONS_STORE_PATH: [], DAILY_CLOSES_STORE_PATH: [], AUDIT_LOGS_STORE_PATH: []},
+        mutate,
+    )
     return jsonify({"ok": True})
 
 
@@ -3035,6 +3161,7 @@ def seed_test_customers():
             "createdById": auth_user["id"],
             "createdByEmail": auth_user["email"],
             "isTestData": True,
+            "environment": "test",
         }
         customers.append(customer)
         created.append(customer)
@@ -3057,8 +3184,14 @@ def get_daily_close():
         return error
     date_key = str(request.args.get("date") or time.strftime("%Y-%m-%d")).strip()
     agent_id = str(request.args.get("agentId") or auth_user["id"]).strip()
+    if agent_id != auth_user["id"]:
+        users = load_user_store()
+        agent = find_user_by_id(users, agent_id)
+        if not agent or auth_user.get("role") not in {"OwnerAdmin", "Supervisor"} or not can_view_staff_record(auth_user, agent):
+            return jsonify({"error": "Access denied"}), 403
+    environment = str(load_portal_settings_store().get("appMode", "test")).lower()
     closes = load_json_list_store(DAILY_CLOSES_STORE_PATH)
-    item = next((entry for entry in closes if str(entry.get("agentId")) == agent_id and str(entry.get("date")) == date_key), None)
+    item = next((entry for entry in closes if str(entry.get("agentId")) == agent_id and str(entry.get("date")) == date_key and str(entry.get("environment", "test")).lower() == environment), None)
     return jsonify({"closed": bool(item), "close": item})
 
 
@@ -3075,33 +3208,54 @@ def close_daily_collections():
     data, error = require_json()
     if error:
         return error
-    date_key = str(data.get("date") or time.strftime("%Y-%m-%d")).strip()
-    collections = [
-        item for item in load_json_list_store(COLLECTIONS_STORE_PATH)
-        if str(item.get("agent_id")) == auth_user["id"] and str(item.get("transaction_date")) == date_key and str(item.get("status")) != "reversed"
-    ]
-    closes = load_json_list_store(DAILY_CLOSES_STORE_PATH)
-    existing = next((entry for entry in closes if str(entry.get("agentId")) == auth_user["id"] and str(entry.get("date")) == date_key), None)
-    if existing:
-        return jsonify({"ok": True, "close": existing})
-    close = {
-        "id": f"close-{now_ms()}-{secrets.token_hex(3)}",
-        "date": date_key,
-        "agentId": auth_user["id"],
-        "agentName": auth_user["fullname"],
-        "branch": auth_user.get("branch", ""),
-        "transactionCount": len(collections),
-        "totalAmountPesewas": sum(record_amount_pesewas(item) for item in collections),
-        "closedAt": now_ms(),
-    }
-    close["totalAmount"] = pesewas_to_amount(close["totalAmountPesewas"])
-    closes.append(close)
-    save_json_list_store(DAILY_CLOSES_STORE_PATH, closes)
-    record_audit_log(auth_user, "CLOSE_DAILY_COLLECTIONS", close)
+    try:
+        cash_counted_pesewas = money_to_pesewas(data.get("cash_counted"))
+    except ValueError as exc:
+        return jsonify({"error": f"Enter the physical cash counted before closing: {exc}"}), 400
+    date_key = time.strftime("%Y-%m-%d")
+    environment = str(load_portal_settings_store().get("appMode", "test")).lower()
+    client_ip = request_ip_address()
+    def mutate(documents):
+        collections = [
+            item for item in documents[COLLECTIONS_STORE_PATH]
+            if str(item.get("agent_id")) == auth_user["id"]
+            and str(item.get("transaction_date")) == date_key
+            and str(item.get("status")) != "reversed"
+            and str(item.get("environment", "test")).lower() == environment
+        ]
+        closes = documents[DAILY_CLOSES_STORE_PATH]
+        existing = next((entry for entry in closes if str(entry.get("agentId")) == auth_user["id"] and str(entry.get("date")) == date_key and str(entry.get("environment", "test")).lower() == environment), None)
+        if existing:
+            return existing
+        close = {
+            "id": f"close-{now_ms()}-{secrets.token_hex(6)}",
+            "date": date_key,
+            "agentId": auth_user["id"],
+            "agentName": auth_user["fullname"],
+            "branch": auth_user.get("branch", ""),
+            "transactionCount": len(collections),
+            "totalAmountPesewas": sum(record_amount_pesewas(item) for item in collections),
+            "cashCountedPesewas": cash_counted_pesewas,
+            "closedAt": now_ms(),
+            "environment": environment,
+        }
+        close["totalAmount"] = pesewas_to_amount(close["totalAmountPesewas"])
+        close["cashCounted"] = pesewas_to_amount(cash_counted_pesewas)
+        close["variancePesewas"] = cash_counted_pesewas - close["totalAmountPesewas"]
+        close["variance"] = pesewas_to_amount(abs(close["variancePesewas"])) * (-1 if close["variancePesewas"] < 0 else 1)
+        close["reviewStatus"] = "exception" if close["variancePesewas"] else "pending"
+        closes.append(close)
+        logs = documents[AUDIT_LOGS_STORE_PATH]
+        logs.insert(0, make_audit_entry(logs, auth_user, "CLOSE_DAILY_COLLECTIONS", close, client_ip))
+        return close
+    close = mutate_store_documents(
+        {COLLECTIONS_STORE_PATH: [], DAILY_CLOSES_STORE_PATH: [], AUDIT_LOGS_STORE_PATH: []},
+        mutate,
+    )
     notify_active_managers(
         kind="daily_close",
         title="Daily collections closed",
-        message=f"{auth_user['fullname']} closed {date_key} with GHS {close['totalAmount']:,.2f}.",
+        message=f"{auth_user['fullname']} closed {date_key} with expected GHS {close['totalAmount']:,.2f}, counted GHS {close['cashCounted']:,.2f}, variance GHS {close['variance']:,.2f}.",
         link_to="/reports",
     )
     return jsonify({"ok": True, "close": close})
@@ -3130,19 +3284,19 @@ def reopen_daily_collections():
         return jsonify({"error": "Select a valid SUSU agent."}), 404
     if not can_view_operational_record(auth_user, {"branch_name": agent.get("branch"), "agent_id": agent_id}):
         return scoped_access_denial(auth_user)
-    closes = load_json_list_store(DAILY_CLOSES_STORE_PATH)
-    kept = [
-        entry for entry in closes
-        if not (str(entry.get("agentId")) == agent_id and str(entry.get("date")) == date_key)
-    ]
-    removed_count = len(closes) - len(kept)
-    if removed_count:
-        save_json_list_store(DAILY_CLOSES_STORE_PATH, kept)
-    record_audit_log(
-        auth_user,
-        "REOPEN_DAILY_COLLECTIONS",
-        {"date": date_key, "agentId": agent_id, "staffName": agent.get("fullname"), "removedCount": removed_count},
-    )
+    environment = str(load_portal_settings_store().get("appMode", "test")).lower()
+    def mutate(documents):
+        closes = documents[DAILY_CLOSES_STORE_PATH]
+        kept = [
+            entry for entry in closes
+            if not (str(entry.get("agentId")) == agent_id and str(entry.get("date")) == date_key and str(entry.get("environment", "test")).lower() == environment)
+        ]
+        removed_count = len(closes) - len(kept)
+        documents[DAILY_CLOSES_STORE_PATH] = kept
+        logs = documents[AUDIT_LOGS_STORE_PATH]
+        logs.insert(0, make_audit_entry(logs, auth_user, "REOPEN_DAILY_COLLECTIONS", {"date": date_key, "agentId": agent_id, "staffName": agent.get("fullname"), "removedCount": removed_count}))
+        return removed_count
+    removed_count = mutate_store_documents({DAILY_CLOSES_STORE_PATH: [], AUDIT_LOGS_STORE_PATH: []}, mutate)
     notify_active_managers(
         kind="daily_close",
         title="Collection day reopened",
@@ -3152,13 +3306,70 @@ def reopen_daily_collections():
     return jsonify({"ok": True, "removedCount": removed_count})
 
 
+@app.route("/api/daily-close/review", methods=["POST", "OPTIONS"])
+def review_daily_close():
+    preflight = handle_options()
+    if preflight:
+        return preflight
+    _, auth_user, error = require_authenticated_user()
+    if error:
+        return error
+    if auth_user.get("role") not in {"OwnerAdmin", "Supervisor"}:
+        return jsonify({"error": "Only supervisors or owner admin can review a daily close."}), 403
+    data, error = require_json()
+    if error:
+        return error
+    agent_id = str(data.get("agentId") or "").strip()
+    date_key = str(data.get("date") or "").strip()
+    status = str(data.get("status") or "").strip().lower()
+    note = str(data.get("note") or "").strip()[:500]
+    if status not in {"approved", "rejected"}:
+        return jsonify({"error": "Close review status must be approved or rejected."}), 400
+    users = load_user_store()
+    agent = find_user_by_id(users, agent_id)
+    if not agent or not can_view_staff_record(auth_user, agent):
+        return jsonify({"error": "Access denied"}), 403
+    environment = str(load_portal_settings_store().get("appMode", "test")).lower()
+
+    def mutate(documents):
+        closes = documents[DAILY_CLOSES_STORE_PATH]
+        close = next((item for item in closes if str(item.get("agentId")) == agent_id and str(item.get("date")) == date_key and str(item.get("environment", "test")).lower() == environment), None)
+        if not close:
+            raise LookupError("Daily close not found")
+        if (status == "rejected" or int(close.get("variancePesewas", 0) or 0) != 0) and not note:
+            raise ValueError("Enter a supervisor note for a rejection or cash variance.")
+        before = {"reviewStatus": close.get("reviewStatus"), "reviewNote": close.get("reviewNote")}
+        close["reviewStatus"] = status
+        close["reviewNote"] = note
+        close["reviewedById"] = auth_user["id"]
+        close["reviewedBy"] = auth_user["fullname"]
+        close["reviewedAt"] = now_ms()
+        logs = documents[AUDIT_LOGS_STORE_PATH]
+        logs.insert(0, make_audit_entry(logs, auth_user, "REVIEW_DAILY_CLOSE", {"date": date_key, "staffName": agent.get("fullname"), "before": before, "after": {"reviewStatus": status, "reviewNote": note}, "reason": note}))
+        return close
+    try:
+        close = mutate_store_documents({DAILY_CLOSES_STORE_PATH: [], AUDIT_LOGS_STORE_PATH: []}, mutate)
+    except LookupError as exc:
+        return jsonify({"error": str(exc)}), 404
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+    return jsonify({"ok": True, "close": close})
+
+
 @app.route("/api/customers", methods=["GET"])
 def get_customers():
     _, auth_user, error = require_authenticated_user()
     if error:
         return error
     customers = load_json_list_store(CUSTOMERS_STORE_PATH)
-    customers = [item for item in customers if can_view_operational_record(auth_user, item)]
+    environment = str(load_portal_settings_store().get("appMode", "test")).lower()
+    customers = [item for item in customers if can_view_operational_record(auth_user, item) and str(item.get("environment", "test")).lower() == environment]
+    if is_susu_agent(auth_user):
+        try:
+            exact_account = normalize_account_number(request.args.get("accountNumber"))
+        except ValueError:
+            return jsonify({"customers": []})
+        customers = [item for item in customers if str(item.get("account_number")) == exact_account]
     customers.sort(key=lambda item: int(item.get("createdAt", 0) or 0), reverse=True)
     return jsonify({"customers": customers})
 
@@ -3193,6 +3404,7 @@ def create_customer():
         branch_name = managed_branch_for_user(auth_user, requested_branch)
     except ValueError as exc:
         return jsonify({"error": str(exc)}), 403
+    environment = str(load_portal_settings_store().get("appMode", "test")).lower()
     customer = {
         "id": f"cust-{now_ms()}-{secrets.token_hex(3)}",
         "account_name": account_name,
@@ -3208,10 +3420,19 @@ def create_customer():
         "createdBy": auth_user["fullname"],
         "createdById": auth_user["id"],
         "createdByEmail": auth_user["email"],
+        "environment": environment,
     }
-    customers.append(customer)
-    save_json_list_store(CUSTOMERS_STORE_PATH, customers)
-    record_audit_log(auth_user, "CREATE_CUSTOMER", {"customerId": customer["id"], "accountName": customer["account_name"]})
+    def mutate(documents):
+        current = documents[CUSTOMERS_STORE_PATH]
+        if any(str(item.get("account_number", "")).strip() == account_number for item in current):
+            raise ValueError("Customer account number already exists")
+        current.append(customer)
+        logs = documents[AUDIT_LOGS_STORE_PATH]
+        logs.insert(0, make_audit_entry(logs, auth_user, "CREATE_CUSTOMER", {"customerId": customer["id"], "accountName": customer["account_name"]}))
+    try:
+        mutate_store_documents({CUSTOMERS_STORE_PATH: [], AUDIT_LOGS_STORE_PATH: []}, mutate)
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
     notify_active_managers(
         kind="customer",
         title="New customer added",
@@ -3232,16 +3453,17 @@ def update_customer(customer_id: str):
     data, error = require_json()
     if error:
         return error
-    customers = load_json_list_store(CUSTOMERS_STORE_PATH)
-    customer = next((item for item in customers if str(item.get("id")) == customer_id), None)
-    if not customer:
-        return jsonify({"error": "Customer not found"}), 404
-    if not can_view_operational_record(auth_user, customer):
-        return jsonify({"error": "Access denied"}), 403
     if not can_manage_agents_and_customers(auth_user):
         return jsonify({"error": "Only supervisors or owner admin can edit customers."}), 403
-    before = dict(customer)
-    try:
+
+    def mutate(documents):
+        customers = documents[CUSTOMERS_STORE_PATH]
+        customer = next((item for item in customers if str(item.get("id")) == customer_id), None)
+        if not customer:
+            raise LookupError("Customer not found")
+        if not can_view_operational_record(auth_user, customer):
+            raise PermissionError("Access denied")
+        before = dict(customer)
         if "account_name" in data:
             customer["account_name"] = normalize_required_text(data.get("account_name"), "Account name")
         if "account_number" in data:
@@ -3256,7 +3478,7 @@ def update_customer(customer_id: str):
                 None,
             )
             if duplicate:
-                return jsonify({"error": "Another customer already uses this account number"}), 400
+                raise ValueError("Another customer already uses this account number")
             customer["account_number"] = account_number
         if "phone" in data:
             customer["phone"] = normalize_phone(data.get("phone"))
@@ -3265,35 +3487,35 @@ def update_customer(customer_id: str):
         if "branch_name" in data or "branch" in data:
             customer["branch_name"] = normalize_portal_branch_name(data.get("branch_name") or data.get("branch"))
         if "address" in data:
-            customer["address"] = str(data.get("address") or "").strip()
-    except ValueError as exc:
-        return jsonify({"error": str(exc)}), 400
-    customer["branch_id"] = customer.get("branch_name", "")
-    if is_assigned_supervisor(auth_user) and not branch_allowed_for_user(auth_user, customer["branch_name"]):
-        return jsonify({"error": "You can only manage customers in your assigned branch."}), 403
-    customer["updatedAt"] = now_ms()
-    save_json_list_store(CUSTOMERS_STORE_PATH, customers)
-    if before.get("customer_status") != customer.get("customer_status"):
-        record_audit_log(
-            auth_user,
-            "CUSTOMER_STATUS_CHANGE",
-            {
+            customer["address"] = str(data.get("address") or "").strip()[:300]
+        customer["branch_id"] = customer.get("branch_name", "")
+        if is_assigned_supervisor(auth_user) and not branch_allowed_for_user(auth_user, customer["branch_name"]):
+            raise PermissionError("You can only manage customers in your assigned branch.")
+        customer["updatedAt"] = now_ms()
+        logs = documents[AUDIT_LOGS_STORE_PATH]
+        if before.get("customer_status") != customer.get("customer_status"):
+            logs.insert(0, make_audit_entry(logs, auth_user, "CUSTOMER_STATUS_CHANGE", {
                 "customerId": customer["id"],
                 "accountNumber": customer.get("account_number"),
                 "before": before.get("customer_status"),
                 "after": customer.get("customer_status"),
-            },
-        )
-    record_audit_log(
-        auth_user,
-        "UPDATE_CUSTOMER",
-        {
+            }))
+        logs.insert(0, make_audit_entry(logs, auth_user, "UPDATE_CUSTOMER", {
             "customerId": customer["id"],
             "accountNumber": customer.get("account_number"),
             "before": before,
             "after": customer,
-        },
-    )
+        }))
+        return customer
+
+    try:
+        customer = mutate_store_documents({CUSTOMERS_STORE_PATH: [], AUDIT_LOGS_STORE_PATH: []}, mutate)
+    except LookupError as exc:
+        return jsonify({"error": str(exc)}), 404
+    except PermissionError as exc:
+        return jsonify({"error": str(exc)}), 403
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
     notify_active_managers(
         kind="customer",
         title="Customer updated",
@@ -3324,6 +3546,7 @@ def import_customers():
     except ValueError as exc:
         return jsonify({"error": str(exc)}), 403
     customers = load_json_list_store(CUSTOMERS_STORE_PATH)
+    environment = str(load_portal_settings_store().get("appMode", "test")).lower()
     existing_numbers = {str(item.get("account_number", "")).strip() for item in customers}
     created = []
     skipped = []
@@ -3365,17 +3588,29 @@ def import_customers():
             "createdById": auth_user["id"],
             "createdByEmail": auth_user["email"],
             "importedBy": auth_user["fullname"],
+            "environment": environment,
         }
         customers.append(customer)
         existing_numbers.add(account_number)
         created.append(customer)
     if created:
-        save_json_list_store(CUSTOMERS_STORE_PATH, customers)
-        record_audit_log(
-            auth_user,
-            "IMPORT_CUSTOMERS",
-            {"branch": import_branch, "created": len(created), "skipped": len(skipped)},
-        )
+        candidates = list(created)
+        def mutate(documents):
+            current = documents[CUSTOMERS_STORE_PATH]
+            current_numbers = {str(item.get("account_number", "")).strip() for item in current}
+            accepted = []
+            for item in candidates:
+                account_number = str(item.get("account_number", "")).strip()
+                if account_number in current_numbers:
+                    skipped.append({"account_number": account_number, "reason": "Duplicate account number"})
+                    continue
+                current.append(item)
+                current_numbers.add(account_number)
+                accepted.append(item)
+            logs = documents[AUDIT_LOGS_STORE_PATH]
+            logs.insert(0, make_audit_entry(logs, auth_user, "IMPORT_CUSTOMERS", {"branch": import_branch, "created": len(accepted), "skipped": len(skipped)}))
+            return accepted
+        created = mutate_store_documents({CUSTOMERS_STORE_PATH: [], AUDIT_LOGS_STORE_PATH: []}, mutate)
     return jsonify({"ok": True, "created": created, "createdCount": len(created), "skipped": skipped})
 
 
@@ -3385,7 +3620,12 @@ def get_collections():
     if error:
         return error
     collections = load_json_list_store(COLLECTIONS_STORE_PATH)
-    collections = [item for item in collections if can_view_operational_record(auth_user, item)]
+    environment = str(load_portal_settings_store().get("appMode", "test")).lower()
+    collections = [
+        item for item in collections
+        if can_view_operational_record(auth_user, item)
+        and str(item.get("environment", "test")).lower() == environment
+    ]
     collections.sort(key=lambda item: int(item.get("created_date", 0) or 0), reverse=True)
     return jsonify({"collections": collections})
 
@@ -3403,65 +3643,113 @@ def create_collection():
     data, error = require_json()
     if error:
         return error
-    transaction_date = str(data.get("transaction_date") or time.strftime("%Y-%m-%d")).strip()
-    closes = load_json_list_store(DAILY_CLOSES_STORE_PATH)
-    if any(str(entry.get("agentId")) == auth_user["id"] and str(entry.get("date")) == transaction_date for entry in closes):
-        return jsonify({"error": "This collection day is closed. Reopen through owner support before recording more deposits."}), 400
     try:
         amount_pesewas = money_to_pesewas(data.get("amount"))
     except ValueError as exc:
         return jsonify({"error": str(exc)}), 400
+    if amount_pesewas > 100_000_000:
+        return jsonify({"error": "A single deposit cannot exceed GHS 1,000,000.00."}), 400
     amount = pesewas_to_amount(amount_pesewas)
-    today = time.strftime("%Y-%m-%d")
+    transaction_date = time.strftime("%Y-%m-%d")
     current_time = time.strftime("%H:%M")
-    collections = load_json_list_store(COLLECTIONS_STORE_PATH)
-    customers = load_json_list_store(CUSTOMERS_STORE_PATH)
     customer_id = str(data.get("customer_id") or "").strip()
-    customer = next((item for item in customers if item.get("id") == customer_id), None)
-    if not customer:
-        return jsonify({"error": "Customer not found"}), 404
-    if str(customer.get("customer_status", "active")).lower() != "active":
-        return jsonify({"error": "Only active customers can receive deposits."}), 400
-    if not can_view_operational_record(auth_user, customer):
-        return jsonify({"error": "You can only record deposits for customers assigned to you."}), 403
-    branch_name = str((customer or {}).get("branch_name") or auth_user.get("branch") or "").strip().upper()
-    transaction_reference = str(data.get("transaction_reference") or f"TXN-{now_ms()}").strip()
-    if any(str(item.get("transaction_reference", "")).strip() == transaction_reference for item in collections):
-        return jsonify({"error": "This transaction reference has already been recorded"}), 400
-    collection = {
-        "id": f"col-{now_ms()}-{secrets.token_hex(3)}",
-        "customer_id": customer_id,
-        "account_name": str(data.get("account_name") or (customer or {}).get("account_name") or "").strip(),
-        "account_number": str(data.get("account_number") or (customer or {}).get("account_number") or "").strip(),
-        "amount": amount,
-        "amountPesewas": amount_pesewas,
-        "agent_name": str(data.get("agent_name") or auth_user["fullname"]),
-        "agent_id": auth_user["id"],
-        "agent_email": auth_user["email"],
-        "branch_id": branch_name,
-        "branch_name": branch_name,
-        "transaction_date": transaction_date or today,
-        "transaction_time": str(data.get("transaction_time") or current_time),
-        "transaction_reference": transaction_reference,
-        "status": str(data.get("status") or "completed"),
-        "supervisor_review_status": str(data.get("supervisor_review_status") or "pending"),
-        "notes": str(data.get("notes") or "").strip(),
-        "recorded_by": auth_user["fullname"],
-        "recordedById": auth_user["id"],
-        "recordedByEmail": auth_user["email"],
-        "created_date": now_ms(),
-    }
-    collections.append(collection)
-    save_json_list_store(COLLECTIONS_STORE_PATH, collections)
-    if customer:
+    idempotency_key = str(data.get("idempotency_key") or request.headers.get("Idempotency-Key") or "").strip()
+    if len(idempotency_key) < 16 or len(idempotency_key) > 128:
+        return jsonify({"error": "A valid idempotency key is required for every deposit."}), 400
+    notes = str(data.get("notes") or "").strip()[:500]
+    settings = load_portal_settings_store()
+    environment = str(settings.get("appMode", "test")).lower()
+    client_ip = request_ip_address()
+
+    def mutate(documents):
+        collections = documents[COLLECTIONS_STORE_PATH]
+        customers = documents[CUSTOMERS_STORE_PATH]
+        closes = documents[DAILY_CLOSES_STORE_PATH]
+        logs = documents[AUDIT_LOGS_STORE_PATH]
+        duplicate = next(
+            (item for item in collections if item.get("agent_id") == auth_user["id"] and item.get("idempotency_key") == idempotency_key),
+            None,
+        )
+        if duplicate:
+            return {"duplicate": True, "collection": duplicate}
+        customer = next((item for item in customers if item.get("id") == customer_id), None)
+        if not customer:
+            raise ValueError("Customer not found")
+        if str(customer.get("customer_status", "active")).lower() != "active":
+            raise ValueError("Only active customers can receive deposits.")
+        if not can_view_operational_record(auth_user, customer):
+            raise PermissionError("You can only record deposits for customers in your assigned branch.")
+        customer_environment = str(customer.get("environment", "test")).lower()
+        if customer_environment != environment:
+            raise ValueError("This customer belongs to a different Test/Live environment.")
+        if any(
+            str(entry.get("agentId")) == auth_user["id"]
+            and str(entry.get("date")) == transaction_date
+            and str(entry.get("environment", "test")).lower() == environment
+            for entry in closes
+        ):
+            raise ValueError("This collection day is closed. A supervisor must reopen it first.")
+        branch_name = str(customer.get("branch_name") or auth_user.get("branch") or "").strip().upper()
+        created_at = now_ms()
+        collection = {
+            "id": f"col-{created_at}-{secrets.token_hex(6)}",
+            "customer_id": customer_id,
+            "account_name": str(customer.get("account_name") or "").strip(),
+            "account_number": str(customer.get("account_number") or "").strip(),
+            "amount": amount,
+            "amountPesewas": amount_pesewas,
+            "agent_name": auth_user["fullname"],
+            "agent_id": auth_user["id"],
+            "agent_email": auth_user["email"],
+            "branch_id": branch_name,
+            "branch_name": branch_name,
+            "transaction_date": transaction_date,
+            "transaction_time": current_time,
+            "transaction_reference": f"SUS-{time.strftime('%Y%m%d')}-{secrets.token_hex(5).upper()}",
+            "idempotency_key": idempotency_key,
+            "status": "completed",
+            "supervisor_review_status": "pending",
+            "notes": notes,
+            "recorded_by": auth_user["fullname"],
+            "recordedById": auth_user["id"],
+            "recordedByEmail": auth_user["email"],
+            "created_date": created_at,
+            "environment": environment,
+        }
+        collections.append(collection)
         existing_total_pesewas = int(customer.get("totalDepositsPesewas", 0) or 0)
         if not existing_total_pesewas and customer.get("total_deposits"):
             existing_total_pesewas = max(0, record_amount_pesewas({"amount": customer.get("total_deposits")}))
         customer["totalDepositsPesewas"] = existing_total_pesewas + amount_pesewas
         customer["total_deposits"] = pesewas_to_amount(customer["totalDepositsPesewas"])
         customer["last_deposit_date"] = collection["transaction_date"]
-        save_json_list_store(CUSTOMERS_STORE_PATH, customers)
-    record_audit_log(auth_user, "CREATE_COLLECTION", {"collectionId": collection["id"], "amount": amount, "customer": collection["account_name"]})
+        audit = make_audit_entry(
+            logs,
+            auth_user,
+            "CREATE_COLLECTION",
+            {"collectionId": collection["id"], "amount": amount, "accountName": collection["account_name"]},
+            client_ip,
+        )
+        logs.insert(0, audit)
+        return {"duplicate": False, "collection": collection}
+
+    try:
+        result = mutate_store_documents(
+            {
+                COLLECTIONS_STORE_PATH: [],
+                CUSTOMERS_STORE_PATH: [],
+                DAILY_CLOSES_STORE_PATH: [],
+                AUDIT_LOGS_STORE_PATH: [],
+            },
+            mutate,
+        )
+    except PermissionError as exc:
+        return jsonify({"error": str(exc)}), 403
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+    collection = result["collection"]
+    if result["duplicate"]:
+        return jsonify({"ok": True, "duplicate": True, "collection": collection})
     notify_active_managers(
         kind="collection",
         title="New deposit recorded",
@@ -3469,6 +3757,19 @@ def create_collection():
         link_to="/transactions",
     )
     return jsonify({"ok": True, "collection": collection})
+
+
+def recalculate_customer_balance(customer: dict, collections: list[dict]) -> None:
+    active = [
+        item for item in collections
+        if str(item.get("customer_id")) == str(customer.get("id"))
+        and str(item.get("status", "completed")).lower() != "reversed"
+        and str(item.get("environment", "test")).lower() == str(customer.get("environment", "test")).lower()
+    ]
+    total = sum(record_amount_pesewas(item) for item in active)
+    customer["totalDepositsPesewas"] = total
+    customer["total_deposits"] = pesewas_to_amount(total)
+    customer["last_deposit_date"] = max((str(item.get("transaction_date") or "") for item in active), default=None)
 
 
 @app.route("/api/collections/<collection_id>/review", methods=["POST", "OPTIONS"])
@@ -3487,41 +3788,69 @@ def review_collection(collection_id: str):
     status = str(data.get("supervisor_review_status") or "").strip().lower()
     if status not in {"pending", "approved", "queried", "rejected"}:
         return jsonify({"error": "Review status must be pending, approved, queried, or rejected."}), 400
-    collections = load_json_list_store(COLLECTIONS_STORE_PATH)
-    item = next((entry for entry in collections if str(entry.get("id")) == str(collection_id)), None)
-    if not item:
-        return jsonify({"error": "Transaction not found"}), 404
-    if not can_view_operational_record(auth_user, item):
-        return scoped_access_denial(auth_user)
     note = str(data.get("correction_note") or "").strip()
-    if status == "queried" and not note:
-        return jsonify({"error": "Enter a correction note before querying a transaction."}), 400
-    before = {
-        "supervisor_review_status": item.get("supervisor_review_status"),
-        "correction_note": item.get("correction_note"),
-    }
-    item["supervisor_review_status"] = status
-    item["reviewed_by"] = auth_user["fullname"]
-    item["reviewed_by_id"] = auth_user["id"]
-    item["reviewed_at"] = now_ms()
-    if status in {"queried", "rejected"}:
-        item["correction_note"] = note
-    elif status == "approved":
-        item["correction_note"] = ""
-    save_json_list_store(COLLECTIONS_STORE_PATH, collections)
-    record_audit_log(
-        auth_user,
-        "REVIEW_COLLECTION",
-        {
-            "collectionId": item["id"],
-            "accountName": item.get("account_name"),
-            "before": before,
-            "after": {
-                "supervisor_review_status": item.get("supervisor_review_status"),
-                "correction_note": item.get("correction_note"),
-            },
-        },
-    )
+    if status in {"queried", "rejected"} and not note:
+        return jsonify({"error": "Enter a reason before querying or rejecting a transaction."}), 400
+    client_ip = request_ip_address()
+
+    def mutate(documents):
+        collections = documents[COLLECTIONS_STORE_PATH]
+        customers = documents[CUSTOMERS_STORE_PATH]
+        logs = documents[AUDIT_LOGS_STORE_PATH]
+        item = next((entry for entry in collections if str(entry.get("id")) == str(collection_id)), None)
+        if not item:
+            raise LookupError("Transaction not found")
+        if not can_view_operational_record(auth_user, item):
+            raise PermissionError("Access denied")
+        before = {
+            "status": item.get("status"),
+            "supervisor_review_status": item.get("supervisor_review_status"),
+            "correction_note": item.get("correction_note"),
+        }
+        item["supervisor_review_status"] = status
+        item["reviewed_by"] = auth_user["fullname"]
+        item["reviewed_by_id"] = auth_user["id"]
+        item["reviewed_at"] = now_ms()
+        if status in {"queried", "rejected"}:
+            item["correction_note"] = note[:500]
+        elif status == "approved":
+            if str(item.get("status")).lower() == "reversed":
+                raise ValueError("A reversed transaction cannot be approved. Record a replacement deposit instead.")
+            item["correction_note"] = ""
+        if status == "rejected" and str(item.get("status")).lower() != "reversed":
+            item["status"] = "reversed"
+            item["reversed_at"] = now_ms()
+            item["reversed_by_id"] = auth_user["id"]
+            item["reversal_reason"] = note[:500]
+            customer = next((entry for entry in customers if str(entry.get("id")) == str(item.get("customer_id"))), None)
+            if customer:
+                recalculate_customer_balance(customer, collections)
+        after = {
+            "status": item.get("status"),
+            "supervisor_review_status": item.get("supervisor_review_status"),
+            "correction_note": item.get("correction_note"),
+        }
+        audit = make_audit_entry(
+            logs,
+            auth_user,
+            "REVIEW_COLLECTION",
+            {"collectionId": item["id"], "accountName": item.get("account_name"), "before": before, "after": after, "reason": note},
+            client_ip,
+        )
+        logs.insert(0, audit)
+        return item
+
+    try:
+        item = mutate_store_documents(
+            {COLLECTIONS_STORE_PATH: [], CUSTOMERS_STORE_PATH: [], AUDIT_LOGS_STORE_PATH: []},
+            mutate,
+        )
+    except LookupError as exc:
+        return jsonify({"error": str(exc)}), 404
+    except PermissionError as exc:
+        return jsonify({"error": str(exc)}), 403
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
     if status == "queried" and item.get("agent_id"):
         create_notifications_for_users(
             [str(item.get("agent_id"))],
@@ -3535,10 +3864,14 @@ def review_collection(collection_id: str):
 
 @app.route("/api/users", methods=["GET"])
 def list_users():
-    _, _, error = require_authenticated_user()
+    _, auth_user, error = require_authenticated_user()
     if error:
         return error
-    return jsonify({"users": serialize_users_with_presence(load_user_store())})
+    users = load_user_store()
+    if not is_owner_admin(auth_user):
+        users = [user for user in users if can_view_staff_record(auth_user, user) or (is_susu_agent(auth_user) and user.get("branch") == auth_user.get("branch"))]
+    presence = prune_presence(load_presence_store())
+    return jsonify({"users": [directory_user_view(auth_user, user, presence) for user in users]})
 
 
 @app.route("/api/users/<user_id>", methods=["GET"])
@@ -3663,7 +3996,7 @@ def update_profile(user_id: str):
 
 @app.route("/api/staff/active", methods=["GET"])
 def get_active_staff():
-    _, _, error = require_authenticated_user()
+    _, auth_user, error = require_authenticated_user()
     if error:
         return error
     users = load_user_store()
@@ -3674,7 +4007,14 @@ def get_active_staff():
         and user["fullname"] not in {"MASTER ADMIN", "System Admin"}
         and user["role"] != OWNER_ADMIN_ROLE
     ]
-    return jsonify({"users": serialize_users_with_presence(active_users)})
+    if not is_owner_admin(auth_user):
+        active_users = [
+            user for user in active_users
+            if can_view_staff_record(auth_user, user)
+            or (is_susu_agent(auth_user) and user.get("branch") == auth_user.get("branch"))
+        ]
+    presence = prune_presence(load_presence_store())
+    return jsonify({"users": [directory_user_view(auth_user, user, presence) for user in active_users]})
 
 
 @app.route("/api/staff/archived", methods=["GET"])
@@ -3712,14 +4052,16 @@ def get_staff_stats():
 
 @app.route("/api/staff/<user_id>", methods=["GET"])
 def get_staff_member(user_id: str):
-    _, _, error = require_authenticated_user()
+    _, auth_user, error = require_authenticated_user()
     if error:
         return error
     users = load_user_store()
     user = find_user_by_id(users, user_id)
     if not user:
         return jsonify({"error": "Staff member not found"}), 404
-    return jsonify({"user": user})
+    if not can_view_staff_record(auth_user, user):
+        return jsonify({"error": "Access denied"}), 403
+    return jsonify({"user": directory_user_view(auth_user, user)})
 
 
 @app.route("/api/staff/<user_id>/update", methods=["POST", "OPTIONS"])
@@ -3916,7 +4258,9 @@ def restore_staff(user_id: str):
         return scoped_access_denial(auth_user)
     user["isArchived"] = False
     user["isActive"] = True
+    user["forcePasswordChange"] = True
     save_user_store(users)
+    revoke_user_sessions(user_id)
     record_audit_log(auth_user, "RESTORE_STAFF", staff_audit_target(user))
     notify_active_managers(
         kind="staff",
@@ -3932,43 +4276,7 @@ def delete_staff(user_id: str):
     preflight = handle_options()
     if preflight:
         return preflight
-    _, auth_user, error = require_authenticated_user()
-    if error:
-        return error
-    if not can_manage_agents_and_customers(auth_user):
-        return jsonify({"error": "Only supervisors or owner admin can remove agents."}), 403
-    users = load_user_store()
-    user = find_user_by_id(users, user_id)
-    if not user:
-        return jsonify({"error": "Staff member not found"}), 404
-    if user_id == auth_user["id"]:
-        return jsonify({"error": "You cannot permanently remove your own account"}), 400
-    if not can_view_staff_record(auth_user, user):
-        return scoped_access_denial(auth_user)
-    if user["role"] in {"OwnerAdmin", "SuperAdmin"}:
-        return jsonify({"error": "Cannot permanently remove Owner or Super Admin."}), 400
-    if not is_global_manager(auth_user) and not is_susu_agent(user):
-        return jsonify({"error": "Supervisors can only remove SUSU agents."}), 403
-    users = [item for item in users if item["id"] != user_id]
-    passwords = load_password_store()
-    passwords.pop(user["email"], None)
-    username = str(user.get("loginUsername") or "").strip()
-    if username:
-        passwords.pop(agent_password_key(username), None)
-    pending = load_pending_verifications()
-    pending.pop(user["email"], None)
-    save_user_store(users)
-    save_password_store(passwords)
-    save_pending_verifications(pending)
-    revoke_user_sessions(user_id)
-    record_audit_log(auth_user, "DELETE_STAFF", staff_audit_target(user))
-    notify_active_managers(
-        kind="staff",
-        title="Staff removed",
-        message=f"{auth_user['fullname']} permanently removed {user['fullname']}.",
-        link_to="/directory",
-    )
-    return jsonify({"ok": True})
+    return jsonify({"error": "Permanent staff deletion is disabled. Archive the account to preserve financial accountability."}), 405
 
 
 @app.route("/api/agents/create", methods=["POST", "OPTIONS"])
@@ -4150,13 +4458,16 @@ def auth_register():
         return preflight
     if not email_delivery_configured():
         return jsonify({"error": "Self-registration is unavailable. Ask the Owner Admin to create your account."}), 503
+    if not SELF_REGISTRATION_ENABLED:
+        return jsonify({"error": "Public registration is disabled. Ask the Owner Admin to create and approve your account."}), 403
     data, error = require_json()
     if error:
         return error
     try:
         email = validate_email(str(data.get("email", "")))
         password = str(data.get("passwordHash", ""))
-        department = normalize_portal_department_name(data.get("department"))
+        # Public applicants cannot grant themselves deposit-taking authority.
+        department = "SUSU"
         branch = normalize_portal_branch_name(data.get("branch"))
         if not password:
             return jsonify({"error": "Password is required"}), 400
@@ -4179,7 +4490,7 @@ def auth_register():
             "department": department,
             "branch": branch,
             "imageFile": None,
-            "isActive": True,
+            "isActive": False,
             "isVerified": False,
             "lastSeen": now_ms(),
             "registrationTime": now_ms(),
@@ -4342,6 +4653,16 @@ def auth_login():
                 "message": "Replace the temporary password before continuing.",
             })
 
+        mfa_secret = mfa_secret_for_email(email) if user.get("role") in {"OwnerAdmin", "Supervisor"} else ""
+        if mfa_secret:
+            mfa_code = "".join(ch for ch in str(data.get("mfaCode") or "") if ch.isdigit())
+            if not mfa_code:
+                return jsonify({"ok": True, "mfaRequired": True, "email": email})
+            if not pyotp.TOTP(mfa_secret).verify(mfa_code, valid_window=1):
+                record_auth_failure(limit_key)
+                record_audit_log(None, "LOGIN_FAILED", {"email": email, "reason": "invalid_mfa"})
+                return jsonify({"error": "Invalid authentication code"}), 401
+
         if not is_secure_password_hash(stored_password):
             passwords[email] = hash_password_for_storage(password)
             save_password_store(passwords)
@@ -4394,6 +4715,38 @@ def auth_complete_password_change():
     session_token = issue_session(user["id"])
     record_audit_log(user, "COMPLETE_INITIAL_PASSWORD_CHANGE", staff_audit_target(user))
     return session_cookie_response(user, session_token, bool(data.get("remember")))
+
+
+@app.route("/api/auth/change-password", methods=["POST", "OPTIONS"])
+def auth_change_password():
+    preflight = handle_options()
+    if preflight:
+        return preflight
+    _, user, error = require_authenticated_user()
+    if error:
+        return error
+    data, error = require_json()
+    if error:
+        return error
+    current_password = str(data.get("currentPassword") or "")
+    try:
+        new_password = validate_password_strength(str(data.get("newPassword") or ""), label="New password")
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+    passwords = load_password_store()
+    username = str(user.get("loginUsername") or "").strip()
+    password_key = agent_password_key(username) if username and passwords.get(agent_password_key(username)) else user["email"]
+    stored_password = passwords.get(password_key)
+    if not stored_password or not verify_password(stored_password, current_password):
+        return jsonify({"error": "Current password is incorrect."}), 401
+    if verify_password(stored_password, new_password):
+        return jsonify({"error": "Choose a password that is different from the current password."}), 400
+    passwords[password_key] = hash_password_for_storage(new_password)
+    save_password_store(passwords)
+    revoke_user_sessions(user["id"])
+    session_token = issue_session(user["id"])
+    record_audit_log(user, "CHANGE_PASSWORD", staff_audit_target(user))
+    return session_cookie_response(user, session_token, False)
 
 
 @app.route("/api/auth/agent-login", methods=["POST", "OPTIONS"])
@@ -4568,7 +4921,6 @@ def auth_request_password_reset():
         return error
     try:
         email = validate_email(str(data.get("email", "")))
-        reset_page_url = str(data.get("resetPageUrl", "")).strip()
         limit_key = rate_limit_key("password-reset", email)
         if auth_rate_limited(limit_key):
             return jsonify({"error": "Too many reset requests. Please wait 15 minutes and try again."}), 429
@@ -4580,9 +4932,9 @@ def auth_request_password_reset():
             return jsonify({"ok": True})
 
         token = secrets.token_urlsafe(32)
-        reset_url = build_reset_url(reset_page_url, token)
+        reset_url = build_reset_url("", token)
         tokens = load_reset_tokens()
-        tokens[token] = {
+        tokens[one_time_token_key(token)] = {
             "email": email,
             "expiresAt": int(time.time()) + int(load_portal_settings_store()["passwordResetMinutes"]) * 60,
         }
@@ -4618,7 +4970,8 @@ def auth_password_reset():
         return jsonify({"error": str(exc)}), 400
 
     tokens = load_reset_tokens()
-    entry = tokens.get(token)
+    token_key = one_time_token_key(token)
+    entry = tokens.get(token_key)
     if not entry:
         return jsonify({"error": "Invalid or expired reset token"}), 400
 
@@ -4629,7 +4982,7 @@ def auth_password_reset():
 
     passwords = load_password_store()
     passwords[email] = hash_password_for_storage(new_password)
-    tokens.pop(token, None)
+    tokens.pop(token_key, None)
     save_password_store(passwords)
     save_reset_tokens(tokens)
     user = find_user_by_email(users, email)
@@ -4874,11 +5227,19 @@ def upload_profile_photo_file():
     preflight = handle_options()
     if preflight:
         return preflight
-    _, _, error = require_authenticated_user()
+    _, auth_user, error = require_authenticated_user()
     if error:
         return error
+    limit_key = rate_limit_key("profile-upload", auth_user["id"])
+    if auth_rate_limited(limit_key):
+        return jsonify({"error": "Too many profile uploads. Wait 15 minutes and try again."}), 429
     try:
-        saved = save_uploaded_media(request.files.get("file"), "profile")
+        prefix = f"profile-{secure_filename(auth_user['id'])}-"
+        for filename in os.listdir(UPLOADS_DIR):
+            if filename.startswith(prefix):
+                remove_uploaded_file_if_unused(filename)
+        saved = save_uploaded_media(request.files.get("file"), "profile", auth_user["id"])
+        record_auth_failure(limit_key)
         return jsonify({"ok": True, **saved})
     except ValueError as exc:
         return jsonify({"error": str(exc)}), 400

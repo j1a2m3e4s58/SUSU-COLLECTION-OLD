@@ -6,6 +6,7 @@ import ControlledSelect from "@/components/ui/controlled-select";
 import { Input } from "@/components/ui/input";
 import { useAuth } from "@/lib/AuthContext";
 import { useTheme } from "@/lib/ThemeContext";
+import { changePassword } from "@/api/authClient";
 import {
   getPortalSettings,
   getUserProfile,
@@ -90,6 +91,8 @@ export default function Profile() {
   const [preview, setPreview] = useState("");
   const [photoFile, setPhotoFile] = useState(null);
   const [removePhoto, setRemovePhoto] = useState(false);
+  const [passwordForm, setPasswordForm] = useState({ current: "", next: "", confirm: "" });
+  const [changingPassword, setChangingPassword] = useState(false);
   const [form, setForm] = useState({
     fullname: "",
     phone: "",
@@ -168,8 +171,8 @@ export default function Profile() {
       setError("Please select an image file.");
       return;
     }
-    if (file.size > 10 * 1024 * 1024) {
-      setError("Please keep profile photos under 10 MB.");
+    if (file.size > 5 * 1024 * 1024) {
+      setError("Please keep profile photos under 5 MB.");
       return;
     }
     if (preview.startsWith("blob:")) URL.revokeObjectURL(preview);
@@ -218,6 +221,26 @@ export default function Profile() {
   async function handleLogout() {
     await logout();
     navigate("/login", { replace: true });
+  }
+
+  async function handlePasswordChange(event) {
+    event.preventDefault();
+    setError("");
+    setMessage("");
+    if (passwordForm.next !== passwordForm.confirm) {
+      setError("The new passwords do not match.");
+      return;
+    }
+    setChangingPassword(true);
+    try {
+      await changePassword(passwordForm.current, passwordForm.next);
+      setPasswordForm({ current: "", next: "", confirm: "" });
+      setMessage("Password changed and all other sessions were signed out.");
+    } catch (err) {
+      setError(err.message || "Password could not be changed.");
+    } finally {
+      setChangingPassword(false);
+    }
   }
 
   if (!user) return null;
@@ -402,6 +425,20 @@ export default function Profile() {
               <InfoRow icon={<UserCircle className="h-4 w-4" />} label="Status" value={user.isVerified ? "Verified" : "Unverified"} />
             </div>
           </div>
+
+          <form onSubmit={handlePasswordChange} className="space-y-3 rounded-2xl border border-border bg-card p-5 shadow-sm">
+            <div>
+              <h3 className="font-heading text-lg font-bold text-foreground">Change password</h3>
+              <p className="text-sm text-muted-foreground">Changing it signs out every other device.</p>
+            </div>
+            <Input type="password" autoComplete="current-password" placeholder="Current password" value={passwordForm.current} onChange={(event) => setPasswordForm((current) => ({ ...current, current: event.target.value }))} required />
+            <Input type="password" autoComplete="new-password" placeholder="New strong password" value={passwordForm.next} onChange={(event) => setPasswordForm((current) => ({ ...current, next: event.target.value }))} required />
+            <Input type="password" autoComplete="new-password" placeholder="Confirm new password" value={passwordForm.confirm} onChange={(event) => setPasswordForm((current) => ({ ...current, confirm: event.target.value }))} required />
+            <Button type="submit" disabled={changingPassword} className="w-full gap-2">
+              <Shield className="h-4 w-4" />
+              {changingPassword ? "Changing..." : "Change Password"}
+            </Button>
+          </form>
 
           <div className="rounded-2xl border border-border bg-card p-5 shadow-sm">
             <div className="flex items-center justify-between gap-4">
